@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.local
+tests/fixtures/*.pdf
+!tests/fixtures/README.md
+.ruff_cache/
+.DS_Store

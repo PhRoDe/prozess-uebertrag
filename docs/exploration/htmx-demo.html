@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<title>Prozess-Übertrag — HTMX-Demo</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .drop-zone { border: 2px dashed #94a3b8; transition: all 0.2s; }
+  .drop-zone.drag-over { border-color: #2563eb; background: #eff6ff; }
+  .screen { display: none; }
+  .screen.active { display: block; }
+  .progress-bar { transition: width 0.3s ease; }
+  .spinner { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+<div class="max-w-3xl mx-auto py-12 px-4">
+  <header class="mb-8">
+    <h1 class="text-3xl font-bold text-slate-900">Prozess-Übertrag</h1>
+    <p class="text-slate-600 mt-1">Jahresabschlüsse in Excel übertragen — Calandi intern</p>
+  </header>
+
+  <!-- Screen 1: Login -->
+  <div id="screen-login" class="screen active bg-white rounded-lg shadow-sm border p-8">
+    <h2 class="text-xl font-semibold mb-4">Anmelden</h2>
+    <input type="password" id="password-input" placeholder="Team-Passwort"
+           class="w-full px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3" />
+    <button onclick="login()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
+      Anmelden
+    </button>
+    <p class="text-xs text-slate-500 mt-3">Tipp für Demo: einfach "demo" eingeben</p>
+  </div>
+
+  <!-- Screen 2: Upload -->
+  <div id="screen-upload" class="screen">
+    <div class="bg-white rounded-lg shadow-sm border p-8">
+      <h2 class="text-xl font-semibold mb-4">PDFs hochladen</h2>
+      <div id="drop-zone" class="drop-zone rounded-lg p-12 text-center cursor-pointer"
+           ondragover="event.preventDefault(); this.classList.add('drag-over')"
+           ondragleave="this.classList.remove('drag-over')"
+           ondrop="handleDrop(event)"
+           onclick="document.getElementById('file-input').click()">
+        <svg class="mx-auto h-12 w-12 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+        </svg>
+        <p class="mt-3 text-slate-700 font-medium">PDFs hierher ziehen</p>
+        <p class="text-sm text-slate-500">oder klicken zum Auswählen (max 10 PDFs, je max 10 MB)</p>
+        <input type="file" id="file-input" multiple accept="application/pdf" class="hidden"
+               onchange="handleFiles(this.files)" />
+      </div>
+
+      <div id="file-list" class="mt-4 space-y-2"></div>
+
+      <button id="start-btn" onclick="startProcessing()" disabled
+              class="mt-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-md w-full">
+        Verarbeitung starten
+      </button>
+    </div>
+  </div>
+
+  <!-- Screen 3: Processing -->
+  <div id="screen-processing" class="screen">
+    <div class="bg-white rounded-lg shadow-sm border p-8">
+      <div class="flex items-center mb-4">
+        <svg class="spinner h-5 w-5 text-blue-600 mr-3" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <h2 class="text-xl font-semibold">PDFs werden verarbeitet …</h2>
+      </div>
+      <div class="w-full bg-slate-200 rounded-full h-2 mb-4">
+        <div id="progress" class="progress-bar bg-blue-600 h-2 rounded-full" style="width: 0%"></div>
+      </div>
+      <p id="progress-text" class="text-sm text-slate-600">Claude liest die PDFs … geschätzte Zeit: ~2 Minuten</p>
+      <p class="text-xs text-slate-500 mt-2">Du kannst den Tab schließen — wir merken uns deinen Stand.</p>
+    </div>
+  </div>
+
+  <!-- Screen 4: Review -->
+  <div id="screen-review" class="screen">
+    <div class="bg-white rounded-lg shadow-sm border p-8">
+      <h2 class="text-xl font-semibold mb-2">3 Konten brauchen deine Zuordnung</h2>
+      <p class="text-slate-600 text-sm mb-6">Claude war sich bei diesen Zeilen nicht sicher. Bitte zuordnen:</p>
+
+      <div class="space-y-4">
+
+        <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
+          <div class="flex justify-between mb-2">
+            <div>
+              <code class="text-xs text-slate-500">Konto 4980 · ja-2024.pdf</code>
+              <p class="font-medium">Sonstige betr. Aufwendungen</p>
+            </div>
+            <span class="font-mono text-sm">12.340,00 €</span>
+          </div>
+          <select class="w-full mt-2 px-3 py-2 border rounded-md">
+            <option value="">— Kategorie wählen —</option>
+            <option>7a. Raumkosten</option>
+            <option>7b. Versicherungen, Beiträge und Abgaben</option>
+            <option>7c. Reparaturen und Instandhaltungen</option>
+            <option selected>7g. Verschiedene betriebliche Kosten</option>
+          </select>
+        </div>
+
+        <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
+          <div class="flex justify-between mb-2">
+            <div>
+              <code class="text-xs text-slate-500">Konto 6780 · ja-2023.pdf</code>
+              <p class="font-medium">Werbeaktionen</p>
+            </div>
+            <span class="font-mono text-sm">8.200,50 €</span>
+          </div>
+          <select class="w-full mt-2 px-3 py-2 border rounded-md">
+            <option value="">— Kategorie wählen —</option>
+            <option selected>7e. Werbe- und Reisekosten</option>
+            <option>7g. Verschiedene betriebliche Kosten</option>
+          </select>
+        </div>
+
+        <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
+          <div class="flex justify-between mb-2">
+            <div>
+              <code class="text-xs text-slate-500">Konto 2720 · ja-2024.pdf</code>
+              <p class="font-medium">Sonstige Zinsen (Bank XY)</p>
+            </div>
+            <span class="font-mono text-sm">450,00 €</span>
+          </div>
+          <select class="w-full mt-2 px-3 py-2 border rounded-md">
+            <option>8. Erträge aus Wertpapieren</option>
+            <option selected>9. Sonstige Zinsen und ähnliche Erträge</option>
+            <option>10. Zinsen und ähnliche Aufwendungen</option>
+          </select>
+        </div>
+
+      </div>
+
+      <button onclick="goToDownload()"
+              class="mt-6 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
+        Excel generieren
+      </button>
+    </div>
+  </div>
+
+  <!-- Screen 5: Download -->
+  <div id="screen-download" class="screen">
+    <div class="bg-white rounded-lg shadow-sm border p-8 text-center">
+      <svg class="mx-auto h-16 w-16 text-green-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <h2 class="text-xl font-semibold mb-2">Fertig!</h2>
+      <p class="text-slate-600 mb-6">Deine Excel ist bereit — 3 Jahre konsolidiert, alle Formeln verlinkt.</p>
+      <a href="#" onclick="alert('In der echten App: Download der .xlsx')"
+         class="inline-block bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-md font-medium">
+        ⬇ uebertrag-2024-03-15.xlsx herunterladen
+      </a>
+      <p class="text-xs text-slate-500 mt-4">Dateien werden nach 24 h automatisch gelöscht.</p>
+      <button onclick="resetApp()" class="mt-6 text-sm text-slate-600 hover:text-slate-900 underline">
+        Neue Verarbeitung starten
+      </button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let uploadedFiles = [];
+
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(el => el.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  function login() {
+    const val = document.getElementById('password-input').value;
+    if (val === 'demo') showScreen('screen-upload');
+    else alert('Für die Demo: "demo" eingeben');
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    event.currentTarget.classList.remove('drag-over');
+    handleFiles(event.dataTransfer.files);
+  }
+
+  function renderFileItem(file) {
+    const isScan = file.name.toLowerCase().includes('scan');
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between p-3 bg-slate-50 rounded border';
+
+    const info = document.createElement('div');
+    const name = document.createElement('p');
+    name.className = 'text-sm font-medium';
+    name.textContent = file.name;
+    const size = document.createElement('p');
+    size.className = 'text-xs text-slate-500';
+    size.textContent = (file.size/1024/1024).toFixed(1) + ' MB';
+    info.appendChild(name);
+    info.appendChild(size);
+
+    const badge = document.createElement('span');
+    if (isScan) {
+      badge.className = 'text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded';
+      badge.textContent = 'Scan erkannt (~3 min)';
+    } else {
+      badge.className = 'text-xs bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded';
+      badge.textContent = 'Text-PDF (~45 s)';
+    }
+
+    row.appendChild(info);
+    row.appendChild(badge);
+    return row;
+  }
+
+  function handleFiles(files) {
+    uploadedFiles = Array.from(files);
+    const list = document.getElementById('file-list');
+    list.textContent = '';
+    uploadedFiles.forEach(f => list.appendChild(renderFileItem(f)));
+    document.getElementById('start-btn').disabled = uploadedFiles.length === 0;
+  }
+
+  function startProcessing() {
+    showScreen('screen-processing');
+    const steps = [
+      { pct: 15, text: 'PDFs hochgeladen …' },
+      { pct: 35, text: 'Dateityp erkannt: 2× Jahresabschluss, 1× BWA' },
+      { pct: 60, text: 'Claude extrahiert Konten …' },
+      { pct: 85, text: 'Multi-Jahres-Konsolidierung …' },
+      { pct: 100, text: 'Fertig — 3 Konten brauchen Review' }
+    ];
+    let i = 0;
+    const tick = () => {
+      if (i >= steps.length) { setTimeout(() => showScreen('screen-review'), 400); return; }
+      document.getElementById('progress').style.width = steps[i].pct + '%';
+      document.getElementById('progress-text').textContent = steps[i].text;
+      i++;
+      setTimeout(tick, 900);
+    };
+    tick();
+  }
+
+  function goToDownload() {
+    showScreen('screen-processing');
+    document.getElementById('progress').style.width = '0%';
+    document.getElementById('progress-text').textContent = 'Excel wird erstellt …';
+    let pct = 0;
+    const iv = setInterval(() => {
+      pct += 20;
+      document.getElementById('progress').style.width = pct + '%';
+      if (pct >= 100) { clearInterval(iv); setTimeout(() => showScreen('screen-download'), 400); }
+    }, 300);
+  }
+
+  function resetApp() {
+    uploadedFiles = [];
+    document.getElementById('file-list').textContent = '';
+    document.getElementById('start-btn').disabled = true;
+    document.getElementById('progress').style.width = '0%';
+    showScreen('screen-upload');
+  }
+</script>
+</body>
+</html>
