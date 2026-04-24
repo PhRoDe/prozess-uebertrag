@@ -63,8 +63,21 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
                     })
                 rows[key]["values"][vj] = acc["betrag_vj"]
 
+    # Bilanzgewinn-Block pro Jahr konsolidieren
+    bilanzgewinn_per_year: dict[int, dict[str, float]] = {}
+    for e in jahresabschluss:
+        bg = e.get("bilanzgewinn")
+        if bg:
+            bilanzgewinn_per_year[e["year"]] = {
+                "gewinnvortrag": bg.get("gewinnvortrag", 0.0),
+                "verlustvortrag": bg.get("verlustvortrag", 0.0),
+                "ausschuettung": bg.get("ausschuettung", 0.0),
+                "bilanzgewinn": bg.get("bilanzgewinn", 0.0),
+            }
+
     return {
         "years": years,
         "rows": list(rows.values()),
         "questions": questions,
+        "bilanzgewinn_per_year": bilanzgewinn_per_year,
     }

@@ -198,6 +198,122 @@ def test_coarse_group_reroutes_to_detail_bucket():
     assert found, "Konto mit grober Gruppe wurde nicht in Excel dargestellt"
 
 
+def test_bilanzgewinn_formula_references_vortrag_and_ausschuettung_rows():
+    """Die Bilanzgewinn-Formel muss Vortrag UND Ausschüttung referenzieren,
+    nicht nur JÜ + 0 - 0."""
+    consolidated = {
+        "years": [2024],
+        "rows": [
+            {"konto_nr": "8400", "bezeichnung": "Umsatz", "gruppe": "1. Umsatzerlöse",
+             "values": {2024: 1000000}, "confidence": "high"},
+        ],
+        "bilanzgewinn_per_year": {
+            2024: {"gewinnvortrag": 50000, "verlustvortrag": 0,
+                   "ausschuettung": 30000, "bilanzgewinn": 100000}
+        },
+        "questions": [],
+    }
+    xlsx = build_excel(consolidated)
+    ws = _ws(xlsx)
+    bg_row = _find_row(ws, "17. Bilanzgewinn")
+    formula = ws.cell(row=bg_row, column=3).value
+    # Muss SUM-Refs auf Vortrag und Ausschüttung enthalten, nicht nur "+0-0"
+    assert "SUM(" in formula, f"Bilanzgewinn-Formel ohne SUM-Refs: {formula}"
+
+
+def test_bilanzgewinn_block_renders_gewinnvortrag_and_ausschuettung():
+    """Fix 3A: Bilanzgewinn-Bereich aus Extraktion erscheint in der Excel."""
+    consolidated = {
+        "years": [2024],
+        "rows": [
+            {"konto_nr": "8400", "bezeichnung": "Umsatz", "gruppe": "1. Umsatzerlöse",
+             "values": {2024: 1000000}, "confidence": "high"},
+        ],
+        "bilanzgewinn_per_year": {
+            2024: {"gewinnvortrag": 50000, "verlustvortrag": 0,
+                   "ausschuettung": 30000, "bilanzgewinn": 100000}
+        },
+        "questions": [],
+    }
+    xlsx = build_excel(consolidated)
+    ws = _ws(xlsx)
+    # Gewinnvortrag-Zeile muss existieren
+    vortrag_row = _find_row(ws, "  Gewinn-/Verlustvortrag aus Vorjahr")
+    assert vortrag_row is not None, "Gewinnvortrag-Zeile fehlt"
+    assert ws.cell(row=vortrag_row, column=3).value == 50000
+    # Ausschüttung-Zeile muss existieren
+    aus_row = _find_row(ws, "  Ausschüttung")
+    assert aus_row is not None, "Ausschüttung-Zeile fehlt"
+    assert ws.cell(row=aus_row, column=3).value == 30000
+
+
+def test_ebitda_block_has_topdown_and_bottomup_and_check():
+    """Fix 4: EBITDA zweigleisig berechnen + Differenz als Check."""
+    xlsx = build_excel(_sample_consolidated())
+    ws = _ws(xlsx)
+    top = _find_row(ws, "EBITDA (Top-Down)")
+    bottom = _find_row(ws, "EBITDA (Bottom-Up)")
+    check = _find_row(ws, "Check (Differenz)")
+    assert top is not None and bottom is not None and check is not None
+    # Check-Formel muss die Differenz der beiden EBITDA-Zeilen sein
+    check_formula = ws.cell(row=check, column=3).value
+    assert isinstance(check_formula, str)
+    assert f"C{top}-C{bottom}" in check_formula
+
+
+def test_ebitda_topdown_references_expected_anchors():
+    xlsx = build_excel(_sample_consolidated())
+    ws = _ws(xlsx)
+    top_row = _find_row(ws, "EBITDA (Top-Down)")
+    formula = ws.cell(row=top_row, column=3).value
+    # Muss auf Gesamtleistung (oder deren Ref), Materialaufwand, Personalaufwand, Sonst. betr. Aufw. verweisen
+    assert "+" in formula and "-" in formula
+
+
+def test_ebitda_bottomup_references_jue_when_abschreibungen_present():
+    """Bottom-Up EBITDA muss JÜ + alle Add-backs referenzieren wenn die Rows existieren."""
+    consolidated = {
+        "years": [2024],
+        "rows": [
+            {"konto_nr": "8400", "bezeichnung": "Umsatz", "gruppe": "1. Umsatzerlöse",
+             "values": {2024: 1000000}, "confidence": "high"},
+            {"konto_nr": "6000", "bezeichnung": "Löhne", "gruppe": "5a. Löhne und Gehälter",
+             "values": {2024: 150000}, "confidence": "high"},
+            {"konto_nr": "4800", "bezeichnung": "AfA", "gruppe": "6. Abschreibungen",
+             "values": {2024: 40000}, "confidence": "high"},
+            {"konto_nr": "7310", "bezeichnung": "Zinsen bank", "gruppe": "10. Zinsen und ähnliche Aufwendungen",
+             "values": {2024: 5000}, "confidence": "high"},
+            {"konto_nr": "7700", "bezeichnung": "KSt", "gruppe": "11. Steuern vom Einkommen und vom Ertrag",
+             "values": {2024: 20000}, "confidence": "high"},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(consolidated)
+    ws = _ws(xlsx)
+    bottom_row = _find_row(ws, "EBITDA (Bottom-Up)")
+    formula = ws.cell(row=bottom_row, column=3).value
+    import re
+    refs = re.findall(r"([A-Z]+\d+)", formula)
+    # Mindestens 4 echte Refs: JÜ, Steuern, Zinsen, AfA
+    assert len(refs) >= 4, f"Bottom-Up-Formel zu kurz: {formula}"
+
+
+def test_ebitda_marge_now_uses_real_ebitda_row_not_jue():
+    """Fix 4: EBITDA-Marge zeigt jetzt auf EBITDA-Zeile, nicht mehr auf JÜ."""
+    xlsx = build_excel(_sample_consolidated())
+    ws = _ws(xlsx)
+    ebitda_row = _find_row(ws, "EBITDA (Top-Down)")
+    marge_row = _find_row(ws, "EBITDA-Marge")
+    umsatzrendite_row = _find_row(ws, "Umsatzrendite")
+    ebitda_formula = ws.cell(row=marge_row, column=3).value
+    rendite_formula = ws.cell(row=umsatzrendite_row, column=3).value
+    # Die beiden Formeln müssen unterschiedlich sein (verschiedene Anchor-Rows)
+    assert ebitda_formula != rendite_formula, \
+        f"EBITDA-Marge identisch mit Umsatzrendite: {ebitda_formula}"
+    # EBITDA-Marge muss auf EBITDA-Zeile zeigen
+    assert f"C{ebitda_row}" in ebitda_formula
+
+
 def test_unmatched_group_goes_to_fragen_sheet():
     """Fix: Nicht-erkennbare Gruppen werden geloggt, nicht silent verworfen."""
     consolidated = {

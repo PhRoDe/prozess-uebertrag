@@ -35,6 +35,10 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
     years = consolidated["years"]
     rows_data = _apply_review(consolidated["rows"], review_answers)
+    bilanzgewinn = consolidated.get("bilanzgewinn_per_year", {})
+    # Bilanzgewinn-Bereich als synthetische Rows injizieren,
+    # damit sie durch denselben Layout-Pfad laufen wie echte Konten.
+    rows_data = rows_data + _bilanzgewinn_synthetic_rows(bilanzgewinn)
     unmatched: list[dict] = []
     by_group = _index_by_group(rows_data, unmatched)
 
@@ -102,13 +106,18 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     # Pass 2 — fill deferred formulas now that all sum rows are known.
     _write_computed_formulas(ws, sum_rows, detail_ranges, years)
 
-    last_data_row = row_cursor - 1
+    # EBITDA-Block — zwei Ansätze + Check
+    row_cursor += 1
+    ebitda_topdown_row, ebitda_bottomup_row, ebitda_check_row = _write_ebitda_block(
+        ws, sum_rows, detail_ranges, years, row_cursor
+    )
+    row_cursor = ebitda_check_row + 2
 
     # Kennzahlen
     row_cursor += 2
     ws.cell(row=row_cursor, column=2, value="Kennzahlen").font = BOLD
     row_cursor += 1
-    anchors = _kennzahlen_anchors(sum_rows)
+    anchors = _kennzahlen_anchors(sum_rows, ebitda_topdown_row=ebitda_topdown_row)
     kz_first_row = row_cursor
     for y_idx, _year in enumerate(years):
         col_idx = 2 + y_idx  # 0-based for formulas.cell()
@@ -146,6 +155,27 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
 
 # -----------------------------------------------------------------------------
+
+
+def _bilanzgewinn_synthetic_rows(bilanzgewinn_per_year: dict[int, dict]) -> list[dict]:
+    """Create synthetic detail rows for Gewinnvortrag and Ausschüttung so the
+    Bilanzgewinn-Formel has real values to reference. Verlustvortrag reduces
+    the Gewinnvortrag net value."""
+    if not bilanzgewinn_per_year:
+        return []
+    vortrag_values: dict[int, float] = {}
+    aus_values: dict[int, float] = {}
+    for year, bg in bilanzgewinn_per_year.items():
+        vortrag_values[year] = bg.get("gewinnvortrag", 0.0) - bg.get("verlustvortrag", 0.0)
+        aus_values[year] = bg.get("ausschuettung", 0.0)
+    return [
+        {"konto_nr": None, "bezeichnung": "Gewinn-/Verlustvortrag aus Vorjahr",
+         "gruppe": "15. Gewinn-/Verlustvortrag", "values": vortrag_values,
+         "confidence": "high"},
+        {"konto_nr": None, "bezeichnung": "Ausschüttung",
+         "gruppe": "16. Ausschüttung", "values": aus_values,
+         "confidence": "high"},
+    ]
 
 
 def _apply_review(rows: list[dict], review_answers: dict) -> list[dict]:
@@ -278,21 +308,104 @@ def _write_computed_formulas(ws, anchors: dict[str, int],
             c.number_format = EUR_FORMAT
             c.font = BOLD
 
-        # 17. Bilanzgewinn = JÜ + Vortrag - Ausschüttung
+        # 17. Bilanzgewinn = JÜ + SUM(Vortrag-range) - SUM(Ausschüttung-range)
+        # 15./16. sind detail-only Gruppen (kein sum row), daher über detail_ranges.
         if (r := anchors.get("17. Bilanzgewinn")) is not None:
-            formula = (f"={ref('14. Jahresüberschuss')}"
-                       f"+{ref('15. Gewinn-/Verlustvortrag')}"
-                       f"-{ref('16. Ausschüttung')}")
+            vortrag = ref_details_sum("15. Gewinn-/Verlustvortrag")
+            aussch = ref_details_sum("16. Ausschüttung")
+            formula = f"={ref('14. Jahresüberschuss')}+{vortrag}-{aussch}"
             c = ws.cell(row=r, column=col, value=formula)
             c.number_format = EUR_FORMAT
             c.font = BOLD
 
 
-def _kennzahlen_anchors(sum_rows: dict[str, int]) -> dict[str, int | None]:
+def _write_ebitda_block(
+    ws,
+    sum_rows: dict[str, int],
+    detail_ranges: dict[str, tuple[int, int]],
+    years: list[int],
+    start_row: int,
+) -> tuple[int, int, int]:
+    """Write two EBITDA calculations (Top-Down + Bottom-Up) plus a diff-check.
+
+    Top-Down  = Gesamtleistung + Sonst. betr. Erträge - Materialaufwand
+                - Personalaufwand - Sonst. betr. Aufw.
+    Bottom-Up = Jahresüberschuss + Steuern vom Einkommen + Sonstige Steuern
+                + Zinsen Aufw. - Erträge Wertpapiere - Sonstige Zinsen Erträge
+                + Abschreibungen
+
+    Returns (top_row, bottom_row, check_row).
+    """
+    # Header
+    header = ws.cell(row=start_row, column=2, value="EBITDA-Überleitung")
+    header.font = BOLD
+    top_row = start_row + 1
+    bottom_row = start_row + 2
+    check_row = start_row + 3
+
+    ws.cell(row=top_row, column=2, value="EBITDA (Top-Down)").font = BOLD
+    ws.cell(row=bottom_row, column=2, value="EBITDA (Bottom-Up)").font = BOLD
+    ws.cell(row=check_row, column=2, value="Check (Differenz)").font = BOLD
+
+    for y_idx in range(len(years)):
+        col = 3 + y_idx
+        col_idx = col - 1
+
+        def ref(code: str) -> str:
+            return safe_ref(col_idx, sum_rows.get(code))
+
+        def ref_details(code: str) -> str:
+            rng = detail_ranges.get(code)
+            if rng is None:
+                return "0"
+            return sum_range(col_idx, rng[0], rng[1])[1:]
+
+        # Top-Down EBITDA
+        top_formula = (
+            f"={ref('2. Gesamtleistung')}"
+            f"+{ref('3. Sonstige betriebliche Erträge')}"
+            f"-{ref('4. Materialaufwand')}"
+            f"-{ref('5. Personalaufwand')}"
+            f"-{ref('7. Sonstige betriebliche Aufwendungen')}"
+        )
+        c = ws.cell(row=top_row, column=col, value=top_formula)
+        c.number_format = EUR_FORMAT
+        c.font = BOLD
+
+        # Bottom-Up EBITDA
+        bottom_formula = (
+            f"={ref('14. Jahresüberschuss')}"
+            f"+{ref('11. Steuern vom Einkommen und vom Ertrag')}"
+            f"+{ref_details('13. Sonstige Steuern')}"
+            f"+{ref_details('10. Zinsen und ähnliche Aufwendungen')}"
+            f"-{ref_details('8. Erträge aus Wertpapieren')}"
+            f"-{ref_details('9. Sonstige Zinsen und ähnliche Erträge')}"
+            f"+{ref('6. Abschreibungen')}"
+        )
+        c = ws.cell(row=bottom_row, column=col, value=bottom_formula)
+        c.number_format = EUR_FORMAT
+        c.font = BOLD
+
+        # Check = Differenz (sollte 0 sein)
+        from openpyxl.utils import get_column_letter
+        letter = get_column_letter(col)
+        check_formula = f"={letter}{top_row}-{letter}{bottom_row}"
+        c = ws.cell(row=check_row, column=col, value=check_formula)
+        c.number_format = EUR_FORMAT
+        c.font = BOLD
+        # Conditional: rot färben wenn |diff| > 1 EUR
+        # (einfacher: immer als rote Zelle markieren falls der Wert != 0;
+        #  hier ohne Conditional Formatting via openpyxl — der User sieht die Zahl)
+
+    return (top_row, bottom_row, check_row)
+
+
+def _kennzahlen_anchors(sum_rows: dict[str, int],
+                        ebitda_topdown_row: int | None = None) -> dict[str, int | None]:
     return {
         "umsatz_row": sum_rows.get("1. Umsatzerlöse"),
         "material_row": sum_rows.get("4. Materialaufwand"),
         "personal_row": sum_rows.get("5. Personalaufwand"),
         "jue_row": sum_rows.get("14. Jahresüberschuss"),
-        "ebitda_row": sum_rows.get("14. Jahresüberschuss"),  # placeholder — proper EBITDA later
+        "ebitda_row": ebitda_topdown_row,
     }
