@@ -29,6 +29,13 @@ def login_submit(request: Request, password: str = Form(...)) -> Response:
     # Fix: Brute-Force-Schutz, 10 Versuche pro 15 min pro IP
     # Railway proxies requests through Fastly — X-Forwarded-For is the real client
     ip = client_ip(request)
+    import logging
+    logging.getLogger(__name__).warning(
+        "LOGIN_ATTEMPT xff=%r client=%r resolved=%r",
+        request.headers.get("x-forwarded-for"),
+        request.client.host if request.client else None,
+        ip,
+    )
     if not rate_allow(f"login:{ip}", max_hits=10, window_seconds=900):
         raise HTTPException(status_code=429,
                             detail="Zu viele Login-Versuche. Bitte 15 min warten.")
