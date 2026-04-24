@@ -5,7 +5,8 @@ from typing import Any
 from anthropic import Anthropic, APIStatusError
 from app.config import get_settings
 from app.worker.prompts import (
-    DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION, BWA_PROMPT,
+    DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION,
+    BWA_PROMPT, SYSTEM_PROMPT,
 )
 
 
@@ -22,12 +23,16 @@ class ClaudeClient:
         self.max_extract_chars = s.max_extract_chars
 
     def classify_document(self, text_or_sample: str) -> str:
-        resp = self._call([
-            {"role": "user", "content": [
-                {"type": "text", "text": DOC_TYPE_PROMPT},
-                {"type": "text", "text": f"\n\nInhalt:\n{text_or_sample[:5000]}"},
-            ]}
-        ])
+        resp = self._call(
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": DOC_TYPE_PROMPT},
+                    {"type": "text",
+                     "text": f"\n\n<pdf_content>\n{text_or_sample[:5000]}\n</pdf_content>"},
+                ]}
+            ],
+            system=SYSTEM_PROMPT,
+        )
         return resp.strip().lower()
 
     def extract_text_pdf(self, text: str, is_bwa: bool = False) -> dict[str, Any]:
@@ -37,12 +42,15 @@ class ClaudeClient:
                 "Bitte kleinere PDF hochladen."
             )
         prompt = BWA_PROMPT if is_bwa else EXTRACTION_PROMPT_TEXT
-        raw = self._call([
-            {"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "text", "text": f"\n\nPDF-Inhalt:\n{text}"},
-            ]}
-        ])
+        raw = self._call(
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "text", "text": f"\n\n<pdf_content>\n{text}\n</pdf_content>"},
+                ]}
+            ],
+            system=SYSTEM_PROMPT,
+        )
         return self._parse_json(raw)
 
     def extract_scan_pdf(self, pages_png: list[bytes], is_bwa: bool = False) -> dict[str, Any]:
@@ -54,27 +62,29 @@ class ClaudeClient:
             }}
             for p in pages_png
         ]
-        raw = self._call([
-            {"role": "user", "content": [{"type": "text", "text": prompt}, *images]}
-        ])
+        raw = self._call(
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, *images]}],
+            system=SYSTEM_PROMPT,
+        )
         return self._parse_json(raw)
 
-    def consolidate(self, prompt: str) -> dict[str, Any]:
-        raw = self._call([{"role": "user", "content": [{"type": "text", "text": prompt}]}])
-        return self._parse_json(raw)
-
-    def _call(self, messages: list[dict[str, Any]], retries: int = 3) -> str:
+    def _call(self, messages: list[dict[str, Any]], retries: int = 3,
+              system: str | None = None) -> str:
         last_err: Exception | None = None
         for attempt in range(retries):
             try:
-                msg = self.sdk.messages.create(
-                    model=self.model, max_tokens=self.max_tokens, messages=messages,
-                )
+                kwargs: dict[str, Any] = {
+                    "model": self.model, "max_tokens": self.max_tokens, "messages": messages,
+                }
+                if system:
+                    kwargs["system"] = system
+                msg = self.sdk.messages.create(**kwargs)
                 return msg.content[0].text
             except APIStatusError as e:
                 last_err = e
                 if getattr(e, "status_code", None) == 429 and attempt < retries - 1:
-                    time.sleep(2 ** attempt)
+                    # Fix 5A: Rate-limit resets oft 30-60s; längere Backoff-Zeiten
+                    time.sleep(min(2 ** attempt * 10, 60))
                     continue
                 raise
             except Exception as e:
