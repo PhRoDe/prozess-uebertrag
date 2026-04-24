@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from app.config import get_settings
 from app.db import JobsRepo
 from app.models import InputFile
-from app.ratelimit import allow as rate_allow
+from app.ratelimit import allow as rate_allow, client_ip
 from app.routes.pages import require_auth
 from app.storage import StorageClient
 from app.worker.tasks import extract_job
@@ -33,9 +33,10 @@ async def upload(
     if not require_auth(request):
         raise HTTPException(status_code=401)
 
-    # Fix: Rate-Limit 10 Uploads/Stunde pro Session-Cookie
+    # Fix: Rate-Limit 10 Uploads/Stunde, Key = Session-Cookie + Client-IP
     session_token = request.cookies.get("pu_session", "anon")[:40]
-    if not rate_allow(f"upload:{session_token}", max_hits=10, window_seconds=3600):
+    ip = client_ip(request)
+    if not rate_allow(f"upload:{session_token}:{ip}", max_hits=10, window_seconds=3600):
         raise HTTPException(status_code=429,
                             detail="Zu viele Uploads. Bitte eine Stunde warten.")
 

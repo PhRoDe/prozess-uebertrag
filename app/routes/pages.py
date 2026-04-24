@@ -4,7 +4,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.auth import create_session_token, validate_session_token, verify_password
 from app.config import get_settings
-from app.ratelimit import allow as rate_allow
+from app.ratelimit import allow as rate_allow, client_ip
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -27,8 +27,9 @@ def login_page(request: Request):
 @router.post("/login")
 def login_submit(request: Request, password: str = Form(...)) -> Response:
     # Fix: Brute-Force-Schutz, 10 Versuche pro 15 min pro IP
-    client_ip = request.client.host if request.client else "unknown"
-    if not rate_allow(f"login:{client_ip}", max_hits=10, window_seconds=900):
+    # Railway proxies requests through Fastly — X-Forwarded-For is the real client
+    ip = client_ip(request)
+    if not rate_allow(f"login:{ip}", max_hits=10, window_seconds=900):
         raise HTTPException(status_code=429,
                             detail="Zu viele Login-Versuche. Bitte 15 min warten.")
     s = get_settings()

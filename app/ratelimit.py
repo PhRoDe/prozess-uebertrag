@@ -11,8 +11,23 @@ from collections import defaultdict, deque
 from threading import Lock
 from time import monotonic
 
+from fastapi import Request
+
 _hits: dict[str, deque[float]] = defaultdict(deque)
 _lock = Lock()
+
+
+def client_ip(request: Request) -> str:
+    """Extract the real client IP.
+
+    Behind Railway's Fastly/edge proxy, `request.client.host` is the proxy's IP
+    (same for all clients → rate-limiter useless). Prefer X-Forwarded-For, fall
+    back to a global bucket if the header is missing.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "global"
 
 
 def allow(key: str, max_hits: int, window_seconds: int) -> bool:
