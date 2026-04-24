@@ -10,7 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from app.excel.structure import GUV_HIERARCHY, match_code
+from app.excel.structure import GUV_HIERARCHY, match_code  # noqa: F401 used in _index_by_group
 from app.excel.formulas import sum_range, safe_ref
 from app.excel.kennzahlen import build_kennzahlen_rows
 
@@ -35,7 +35,8 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
     years = consolidated["years"]
     rows_data = _apply_review(consolidated["rows"], review_answers)
-    by_group = _index_by_group(rows_data)
+    unmatched: list[dict] = []
+    by_group = _index_by_group(rows_data, unmatched)
 
     # Header
     headers = ["Konto", "Bezeichnung"] + [str(y) for y in years]
@@ -99,7 +100,7 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             row_cursor += 1
 
     # Pass 2 — fill deferred formulas now that all sum rows are known.
-    _write_computed_formulas(ws, sum_rows, years)
+    _write_computed_formulas(ws, sum_rows, detail_ranges, years)
 
     last_data_row = row_cursor - 1
 
@@ -132,6 +133,12 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     fragen.append(["Thema", "Details"])
     for q in consolidated.get("questions", []):
         fragen.append([q.get("type", ""), str(q)])
+    for u in unmatched:
+        fragen.append([
+            "unmatched_group",
+            f"Konto {u.get('konto_nr') or '(ohne Nr)'}: '{u.get('bezeichnung')}' "
+            f"— Gruppe '{u.get('gruppe')}' nicht in HGB-Gliederung erkennbar"
+        ])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -152,20 +159,50 @@ def _apply_review(rows: list[dict], review_answers: dict) -> list[dict]:
     return out
 
 
-def _index_by_group(rows: list[dict]) -> dict[str, list[dict]]:
-    """Group rows by their canonical HGB code (via fuzzy match_code).
-    Rows with no matching group are dropped — they would have no place in the layout."""
+GROUP_COARSE_TO_DETAIL = {
+    "4. Materialaufwand": "4a. Aufwendungen für RHB und Waren",
+    "5. Personalaufwand": "5a. Löhne und Gehälter",
+    "7. Sonstige betriebliche Aufwendungen": "7g. Verschiedene betriebliche Kosten",
+}
+
+
+def _index_by_group(rows: list[dict], unmatched: list[dict]) -> dict[str, list[dict]]:
+    """Group rows by their canonical HGB code.
+
+    If Claude returns a coarse group (e.g. "4. Materialaufwand" without a/b
+    subdivision), route into the most-likely detail-bucket so the account is
+    not lost. If the group matches a code marked as "formula" only (no details
+    block), also reroute. Truly unmatched rows are appended to `unmatched`
+    and later surface in the Fragen-Sheet.
+    """
+    detail_codes = {e["code"] for e in GUV_HIERARCHY if e["kind"] == "details"}
+
     by_group: dict[str, list[dict]] = {}
     for r in rows:
         canonical = match_code(r.get("gruppe"))
         if canonical is None:
+            unmatched.append({"konto_nr": r.get("konto_nr"),
+                              "bezeichnung": r.get("bezeichnung"),
+                              "gruppe": r.get("gruppe")})
             continue
+        # Reroute groups that land on a formula-only row (no details block)
+        if canonical not in detail_codes:
+            rerouted = GROUP_COARSE_TO_DETAIL.get(canonical)
+            if rerouted:
+                canonical = rerouted
+            else:
+                unmatched.append({"konto_nr": r.get("konto_nr"),
+                                  "bezeichnung": r.get("bezeichnung"),
+                                  "gruppe": r.get("gruppe")})
+                continue
         by_group.setdefault(canonical, []).append(r)
     return by_group
 
 
-def _write_computed_formulas(ws, anchors: dict[str, int], years: list[int]) -> None:
-    """Fill in the four cascade formulas that depend on other sum rows:
+def _write_computed_formulas(ws, anchors: dict[str, int],
+                              detail_ranges: dict[str, tuple[int, int]],
+                              years: list[int]) -> None:
+    """Fill in the cascade formulas that depend on other sum rows:
     2. Gesamtleistung, 4. Materialaufwand, 5. Personalaufwand,
     7. Sonstige betr. Aufwendungen, 12. Ergebnis nach Steuern,
     14. Jahresüberschuss, 17. Bilanzgewinn."""
@@ -175,6 +212,13 @@ def _write_computed_formulas(ws, anchors: dict[str, int], years: list[int]) -> N
 
         def ref(code: str) -> str:
             return safe_ref(col_idx, anchors.get(code))
+
+        def ref_details_sum(code: str) -> str:
+            """For groups without a sum row (7c-g), sum the detail range directly."""
+            rng = detail_ranges.get(code)
+            if rng is None:
+                return "0"
+            return sum_range(col_idx, rng[0], rng[1])[1:]  # strip leading "="
 
         # 2. Gesamtleistung = 1. Umsatzerlöse (simplified)
         if (r := anchors.get("2. Gesamtleistung")) is not None:
@@ -197,26 +241,18 @@ def _write_computed_formulas(ws, anchors: dict[str, int], years: list[int]) -> N
             c.number_format = EUR_FORMAT
             c.font = BOLD
 
-        # 7. Sonstige betr. Aufwendungen = 7a + 7b + details of 7c-g
-        # For 7c/d/e/f/g we use their details-range sum directly (no sum row exists
-        # because they're flat detail-only groups). We approximate via the group's
-        # details-range we can build inline here if we had them — use the sum rows
-        # of 7a/7b + simple references to detail rows (we store details in a separate
-        # pass above, here we only need anchors for sub-totals).
-        # Simpler: use known sums only — 7a and 7b sum rows plus a dedicated details
-        # range for each unsummed 7x group. We'll build that here:
-        # In pass 1 we kept sum rows for 7a and 7b only. For 7c-7g details,
-        # use their detail-range via a helper passed into this function — but we
-        # didn't carry that through. Simplest correct approach: build 7. as
-        # sum of all the individual detail-rows for 7a-g through their sum rows
-        # where they exist, else 0. That's accurate because 7c-g have no summe
-        # and their cells are direct values, so safe_ref on the group's "sum row"
-        # won't exist. We handle this correctly in a follow-up pass — TODO for now.
-        # For the first release: 7 = 7a + 7b (known underestimate if 7c-g present).
-        # This produces a visible discrepancy that goes into the Fragen-Sheet.
+        # 7. Sonstige betr. Aufwendungen = 7a-sum + 7b-sum + 7c-g details
+        # (7c-g haben nur details, keine eigene sum row — daher direkt SUM über ihre
+        #  detail-ranges).
         if (r := anchors.get("7. Sonstige betriebliche Aufwendungen")) is not None:
-            parts = ["7a. Raumkosten", "7b. Versicherungen, Beiträge und Abgaben"]
-            formula = "=" + "+".join(ref(p) for p in parts)
+            parts = [ref("7a. Raumkosten"),
+                     ref("7b. Versicherungen, Beiträge und Abgaben"),
+                     ref_details_sum("7c. Reparaturen und Instandhaltungen"),
+                     ref_details_sum("7d. Fahrzeugkosten"),
+                     ref_details_sum("7e. Werbe- und Reisekosten"),
+                     ref_details_sum("7f. Kosten der Warenabgabe"),
+                     ref_details_sum("7g. Verschiedene betriebliche Kosten")]
+            formula = "=" + "+".join(parts)
             c = ws.cell(row=r, column=col, value=formula)
             c.number_format = EUR_FORMAT
             c.font = BOLD

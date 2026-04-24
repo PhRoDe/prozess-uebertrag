@@ -141,3 +141,77 @@ def test_kennzahlen_section_has_percent_formulas():
     formula = ws.cell(row=mq_row, column=3).value
     assert isinstance(formula, str) and formula.startswith("=IFERROR")
     assert ws.cell(row=mq_row, column=3).number_format == "0.0%"
+
+
+def test_sonst_betr_aufw_sum_includes_7c_through_7g():
+    """Fix: Kategorien 7c-g (ohne eigene Sum-Row) müssen in Summe 7 einfließen.
+    Sonst wird JÜ überbewertet."""
+    consolidated = {
+        "years": [2024],
+        "rows": [
+            {"konto_nr": "8400", "bezeichnung": "Umsatz",
+             "gruppe": "1. Umsatzerlöse",
+             "values": {2024: 1000000}, "confidence": "high"},
+            {"konto_nr": "4100", "bezeichnung": "Fahrzeugkosten",
+             "gruppe": "7d. Fahrzeugkosten",
+             "values": {2024: 10000}, "confidence": "high"},
+            {"konto_nr": "4200", "bezeichnung": "Werbung",
+             "gruppe": "7e. Werbe- und Reisekosten",
+             "values": {2024: 15000}, "confidence": "high"},
+            {"konto_nr": "4900", "bezeichnung": "Sonstiges",
+             "gruppe": "7g. Verschiedene betriebliche Kosten",
+             "values": {2024: 5000}, "confidence": "high"},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(consolidated)
+    ws = _ws(xlsx)
+    row7 = _find_row(ws, "7. Sonstige betriebliche Aufwendungen")
+    assert row7 is not None
+    formula = ws.cell(row=row7, column=3).value
+    assert isinstance(formula, str) and formula.startswith("=")
+    # Formel muss SUM-Refs enthalten — nicht nur 7a+7b
+    import re
+    sum_refs = re.findall(r"SUM\(", formula)
+    assert len(sum_refs) >= 3, f"Erwarte >=3 SUM-Refs (7d, 7e, 7g), gefunden in: {formula}"
+
+
+def test_coarse_group_reroutes_to_detail_bucket():
+    """Fix: Claude sagt manchmal '4. Materialaufwand' statt '4a./4b.' — Konto
+    darf nicht verloren gehen."""
+    consolidated = {
+        "years": [2024],
+        "rows": [
+            {"konto_nr": "5100", "bezeichnung": "Wareneingang",
+             "gruppe": "4. Materialaufwand",  # grob, ohne a/b
+             "values": {2024: 400000}, "confidence": "high"},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(consolidated)
+    ws = _ws(xlsx)
+    found = False
+    for row in ws.iter_rows():
+        if row[1].value == "  Wareneingang":
+            found = True
+            break
+    assert found, "Konto mit grober Gruppe wurde nicht in Excel dargestellt"
+
+
+def test_unmatched_group_goes_to_fragen_sheet():
+    """Fix: Nicht-erkennbare Gruppen werden geloggt, nicht silent verworfen."""
+    consolidated = {
+        "years": [2024],
+        "rows": [
+            {"konto_nr": "9999", "bezeichnung": "Mysteriös",
+             "gruppe": "Völlig Unbekannt",
+             "values": {2024: 1234}, "confidence": "low"},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(consolidated)
+    wb = load_workbook(io.BytesIO(xlsx))
+    fragen = wb["Fragen"]
+    texts = [str(c.value) for row in fragen.iter_rows() for c in row if c.value]
+    assert any("Mysteriös" in t for t in texts), \
+        f"Fragen-Sheet sollte Mysteriös-Hinweis enthalten: {texts}"
