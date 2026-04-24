@@ -26,6 +26,10 @@ dev = [
     "mypy>=1.8",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
