@@ -1,0 +1,15 @@
+<div class="bg-white rounded-lg shadow-sm border p-8 text-center"
+     hx-trigger="none">
+  <svg class="mx-auto h-16 w-16 text-green-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
+  <h2 class="text-xl font-semibold mb-2">Fertig</h2>
+  <p class="text-slate-600 mb-6">Deine Excel ist bereit, alle Formeln sind verlinkt.</p>
+  <a href="/download/{{ job.id }}"
+     class="inline-block bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-md font-medium">
+    Excel herunterladen
+  </a>
+  <p class="text-xs text-slate-500 mt-4">Der Link gilt 15 Minuten. Dateien werden nach 24 h automatisch gelöscht.</p>
+  <p class="mt-6"><a href="/" class="text-sm text-slate-600 hover:text-slate-900 underline">Neue Verarbeitung starten</a></p>
+</div>

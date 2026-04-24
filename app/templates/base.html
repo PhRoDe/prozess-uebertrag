@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>{% block title %}Prozess-Übertrag{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .drop-zone { border: 2px dashed #94a3b8; transition: all 0.2s; }
+    .drop-zone.drag-over { border-color: #2563eb; background: #eff6ff; }
+    .spinner { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+  <div class="max-w-3xl mx-auto py-12 px-4">
+    <header class="mb-8 flex items-center justify-between">
+      <div>
+        <h1 class="text-3xl font-bold text-slate-900">Prozess-Übertrag</h1>
+        <p class="text-slate-600 mt-1">Jahresabschlüsse in Excel übertragen — Calandi intern</p>
+      </div>
+      {% if show_logout %}
+        <form action="/logout" method="post">
+          <button class="text-sm text-slate-600 hover:text-slate-900 underline">Logout</button>
+        </form>
+      {% endif %}
+    </header>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

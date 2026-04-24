@@ -1,0 +1,45 @@
+{% set open_questions = job.extraction.open_questions if job.extraction else [] %}
+<div class="bg-white rounded-lg shadow-sm border p-8"
+     hx-trigger="none">
+  {% if open_questions %}
+    <h2 class="text-xl font-semibold mb-2">{{ open_questions|length }} Konten brauchen deine Zuordnung</h2>
+    <p class="text-slate-600 text-sm mb-6">Claude war sich bei diesen Zeilen nicht sicher:</p>
+
+    <form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="innerHTML">
+      <div class="space-y-4">
+        {% for q in open_questions %}
+        <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
+          <div class="flex justify-between mb-2">
+            <div>
+              <code class="text-xs text-slate-500">Konto {{ q.konto_nr or "—" }} · {{ q.document or "PDF" }}</code>
+              <p class="font-medium">{{ q.bezeichnung }}</p>
+            </div>
+            <span class="font-mono text-sm">{{ "%.2f" % (q.betrag_gj or 0) }} €</span>
+          </div>
+          <select name="review[{{ q.konto_nr }}]"
+                  class="w-full mt-2 px-3 py-2 border rounded-md">
+            <option value="">— Kategorie wählen —</option>
+            {% for g in (q.suggested_groups or []) %}
+              <option value="{{ g }}">{{ g }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endfor %}
+      </div>
+
+      <button type="submit"
+              class="mt-6 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
+        Excel generieren
+      </button>
+    </form>
+  {% else %}
+    <h2 class="text-xl font-semibold mb-2">Alles klar — keine Rückfragen</h2>
+    <p class="text-slate-600 text-sm mb-6">Claude hat alle Konten eindeutig zugeordnet.</p>
+    <form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="innerHTML">
+      <button type="submit"
+              class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
+        Excel generieren
+      </button>
+    </form>
+  {% endif %}
+</div>

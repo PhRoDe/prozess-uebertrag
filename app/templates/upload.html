@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% set show_logout = true %}
+{% block content %}
+<form id="upload-form" hx-post="/upload" hx-encoding="multipart/form-data"
+      hx-indicator="#upload-spinner"
+      class="bg-white rounded-lg shadow-sm border p-8">
+  <h2 class="text-xl font-semibold mb-4">PDFs hochladen</h2>
+  <div id="drop-zone" class="drop-zone rounded-lg p-12 text-center cursor-pointer">
+    <svg class="mx-auto h-12 w-12 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+    </svg>
+    <p class="mt-3 text-slate-700 font-medium">PDFs hierher ziehen</p>
+    <p class="text-sm text-slate-500">oder klicken — max 10 PDFs, je max 10 MB</p>
+    <input type="file" name="files" multiple accept="application/pdf" class="hidden" id="file-input" />
+  </div>
+  <div id="file-list" class="mt-4 space-y-2"></div>
+  <button type="submit" disabled id="submit-btn"
+          class="mt-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-md w-full">
+    <span id="upload-spinner" class="htmx-indicator">...</span>
+    Verarbeitung starten
+  </button>
+</form>
+
+<script>
+  const drop = document.getElementById('drop-zone');
+  const input = document.getElementById('file-input');
+  const submit = document.getElementById('submit-btn');
+
+  drop.addEventListener('click', () => input.click());
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag-over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('drag-over');
+    input.files = e.dataTransfer.files;
+    renderList();
+  });
+  input.addEventListener('change', renderList);
+
+  function renderList() {
+    const list = document.getElementById('file-list');
+    list.textContent = '';
+    for (const f of input.files) {
+      const div = document.createElement('div');
+      div.className = 'flex items-center justify-between p-3 bg-slate-50 rounded border';
+      const info = document.createElement('div');
+      const name = document.createElement('p');
+      name.className = 'text-sm font-medium';
+      name.textContent = f.name;
+      const size = document.createElement('p');
+      size.className = 'text-xs text-slate-500';
+      size.textContent = (f.size / 1024 / 1024).toFixed(1) + ' MB';
+      info.appendChild(name);
+      info.appendChild(size);
+      div.appendChild(info);
+      list.appendChild(div);
+    }
+    submit.disabled = input.files.length === 0;
+  }
+</script>
+{% endblock %}
