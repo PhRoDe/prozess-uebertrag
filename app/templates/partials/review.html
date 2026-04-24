@@ -2,38 +2,29 @@
 <div id="job-state" class="bg-white rounded-lg shadow-sm border p-8">
   {% if open_questions %}
     <h2 class="text-xl font-semibold mb-2">{{ open_questions|length }} Konten brauchen deine Zuordnung</h2>
-    <p class="text-slate-600 text-sm mb-6">Claude war sich bei diesen Zeilen nicht sicher:</p>
+    <p class="text-slate-600 text-sm mb-6">Claude konnte diese Zeilen keiner Gruppe im Kontennachweis zuordnen:</p>
 
     <form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="outerHTML">
       <div class="space-y-4">
         {% for q in open_questions %}
-        {% set sugg = q.suggested_groups or [] %}
         <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
           <div class="flex justify-between mb-2">
             <div>
               <code class="text-xs text-slate-500">Konto {{ q.konto_nr or "—" }} · {{ q.document or "PDF" }}</code>
               <p class="font-medium">{{ q.bezeichnung }}</p>
+              {% if q.hint %}
+                <p class="text-xs text-slate-500 italic mt-1">{{ q.hint }}</p>
+              {% endif %}
             </div>
             <span class="font-mono text-sm">{{ "%.2f" % (q.betrag_gj or 0) }} €</span>
           </div>
           <select name="review[{{ q.konto_nr }}]"
                   class="w-full mt-2 px-3 py-2 border rounded-md bg-white"
                   required>
-            <option value="">— Kategorie wählen —</option>
-            {% if sugg %}
-              <optgroup label="Claude-Vorschläge">
-                {% for g in sugg %}
-                  <option value="{{ g }}">{{ g }}</option>
-                {% endfor %}
-              </optgroup>
-            {% endif %}
-            <optgroup label="Alle HGB-Kategorien">
-              {% for g in all_detail_groups %}
-                {% if g not in sugg %}
-                  <option value="{{ g }}">{{ g }}</option>
-                {% endif %}
-              {% endfor %}
-            </optgroup>
+            <option value="">— Gruppe wählen —</option>
+            {% for g in all_detail_groups %}
+              <option value="{{ g }}">{{ g }}</option>
+            {% endfor %}
           </select>
         </div>
         {% endfor %}

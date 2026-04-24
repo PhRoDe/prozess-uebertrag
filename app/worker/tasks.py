@@ -72,10 +72,16 @@ def extract_job(job_id: str) -> None:
             extractions.append(extraction)
 
         consolidated = merge_extractions(extractions)
+        # open_questions für Review-Screen: nur aus der jüngsten JA (die ist am relevantesten)
+        open_questions: list = []
+        for doc in extractions:
+            if doc.get("type") == "jahresabschluss":
+                for oq in doc.get("open_questions", []):
+                    open_questions.append({**oq, "document": doc.get("file")})
         payload = {
             "documents": extractions,
             "consolidated": consolidated,
-            "open_questions": [q for doc in extractions for q in doc.get("open_questions", [])],
+            "open_questions": open_questions,
         }
         repo.set_extraction(job_id, payload)
     except ExtractionError as e:

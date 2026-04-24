@@ -1,7 +1,15 @@
-"""Excel-Builder — erzeugt die vollständig verformelte Mehrjahres-Excel.
+"""Excel-Builder — erzeugt die Übertrag-Excel basierend auf der
+dynamischen Gruppenstruktur aus der Konsolidierung.
 
-Top-Anforderung (Spec §4): Alle Zwischensummen müssen Formeln sein.
-Doppelklick auf jede Zelle zeigt, wie der Wert entsteht.
+Layout:
+- Header: Konto | Bezeichnung | Jahr-1 | Jahr-2 | BWA xyz | ...
+- Pro Gruppe:
+    * Summen-Zeile (fett) OBEN: Name + SUM-Formel über Detail-Zeilen (für JAs)
+      bzw. direkter Wert (für BWAs)
+    * Details: alle Konten darunter
+- Nach allen Gruppen: `Jahresergebnis` als Formel
+  (respektiert sign_convention + Gruppen-Typen)
+- Zweites Sheet `Fragen`: Data-Quality-Issues
 """
 import io
 from typing import Any
@@ -10,402 +18,229 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from app.excel.structure import GUV_HIERARCHY, match_code  # noqa: F401 used in _index_by_group
-from app.excel.formulas import sum_range, safe_ref
-from app.excel.kennzahlen import build_kennzahlen_rows
-
 EUR_FORMAT = '#,##0.00;[Red]-#,##0.00'
-PCT_FORMAT = "0.0%"
 YELLOW = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
-RED = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
 BOLD = Font(bold=True)
+BOLD_LIGHT = Font(bold=True, color="555555")
 
 
 def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes:
-    """Build the final Excel bytes from consolidated data + optional review answers.
+    """Build the final xlsx bytes from the consolidated structure.
 
-    consolidated = {years: [int], rows: [{konto_nr, bezeichnung, gruppe, values, confidence}],
-                    questions: [dict]}
-    review_answers = {konto_nr_or_key: canonical_group_code} — overrides Claude's group
+    review_answers: optional mapping {konto_nr -> target_group_name} for accounts
+                    that landed in open_questions.
     """
     review_answers = review_answers or {}
     wb = Workbook()
     ws = wb.active
     ws.title = "Übertrag"
 
-    years = consolidated["years"]
-    rows_data = _apply_review(consolidated["rows"], review_answers)
-    bilanzgewinn = consolidated.get("bilanzgewinn_per_year", {})
-    # Bilanzgewinn-Bereich als synthetische Rows injizieren,
-    # damit sie durch denselben Layout-Pfad laufen wie echte Konten.
-    rows_data = rows_data + _bilanzgewinn_synthetic_rows(bilanzgewinn)
-    unmatched: list[dict] = []
-    by_group = _index_by_group(rows_data, unmatched)
+    columns = consolidated.get("columns", [])
+    groups = consolidated.get("groups", [])
 
-    # Header
-    headers = ["Konto", "Bezeichnung"] + [str(y) for y in years]
-    for col_idx, h in enumerate(headers):
-        c = ws.cell(row=1, column=col_idx + 1, value=h)
+    # _apply_review routed open-question accounts into named groups
+    groups = _apply_review_answers(groups, consolidated.get("questions", []),
+                                    review_answers)
+
+    # Header row
+    ws.cell(row=1, column=1, value="Konto").font = BOLD
+    ws.cell(row=1, column=2, value="Bezeichnung").font = BOLD
+    for col_idx, col in enumerate(columns):
+        c = ws.cell(row=1, column=3 + col_idx, value=col["label"])
         c.font = BOLD
 
-    row_cursor = 3  # blank row 2 for spacing
-    detail_ranges: dict[str, tuple[int, int]] = {}  # code -> (first_detail_row, last_detail_row)
-    sum_rows: dict[str, int] = {}                   # code -> row number of summe/formula
+    # Pre-compute: which groups are parents of sub-groups
+    children_by_parent: dict[str, list[str]] = {}
+    for g in groups:
+        parent = g.get("sub_group_of")
+        if parent:
+            children_by_parent.setdefault(parent, []).append(g["name"])
 
-    # Pass 1 — write details + sum/formula placeholders in document order.
-    # Formula rows are placeholders; actual formula text is filled in Pass 2
-    # once all sum rows are known.
-    formula_deferrals: list[dict] = []
+    # Rows
+    group_sum_rows: dict[str, int] = {}  # group_name -> row
+    row_cursor = 2
 
-    for entry in GUV_HIERARCHY:
-        code = entry["code"]
-        kind = entry["kind"]
+    for g in groups:
+        # Summen-Zeile zuerst
+        sum_row = row_cursor
+        group_sum_rows[g["name"]] = sum_row
+        is_sub = g.get("sub_group_of") is not None
+        label = ("  " if is_sub else "") + g["name"]
+        cell_label = ws.cell(row=sum_row, column=2, value=label)
+        cell_label.font = BOLD if not is_sub else BOLD_LIGHT
 
-        if kind == "details":
-            details = by_group.get(code, [])
-            if not details:
-                continue
-            start = row_cursor
-            for r in details:
-                ws.cell(row=row_cursor, column=1, value=r["konto_nr"] or "")
-                ws.cell(row=row_cursor, column=2, value=f"  {r['bezeichnung']}")
-                for y_idx, year in enumerate(years):
-                    val = r["values"].get(year)
-                    c = ws.cell(row=row_cursor, column=3 + y_idx, value=val)
-                    c.number_format = EUR_FORMAT
-                    if r.get("confidence") == "low":
-                        c.fill = YELLOW
-                row_cursor += 1
-            detail_ranges[code] = (start, row_cursor - 1)
+        has_children = g["name"] in children_by_parent and not g.get("accounts")
 
-        elif kind == "sum":
-            rng = detail_ranges.get(code)
-            if not rng:
-                continue  # no details to sum
-            label = ws.cell(row=row_cursor, column=2, value=code)
-            if entry.get("bold"):
-                label.font = BOLD
-            for y_idx in range(len(years)):
-                col = 3 + y_idx
-                c = ws.cell(row=row_cursor, column=col, value=sum_range(col - 1, *rng))
+        # Accounts
+        detail_start = row_cursor + 1
+        detail_end = detail_start - 1
+        for acc in g.get("accounts", []):
+            row_cursor += 1
+            ws.cell(row=row_cursor, column=1, value=acc.get("konto_nr") or "")
+            ws.cell(row=row_cursor, column=2, value=f"  {acc.get('bezeichnung', '')}")
+            for col_idx in range(len(columns)):
+                v = acc.get("values", {}).get(col_idx)
+                c = ws.cell(row=row_cursor, column=3 + col_idx, value=v)
                 c.number_format = EUR_FORMAT
-                if entry.get("bold"):
-                    c.font = BOLD
-            sum_rows[code] = row_cursor
-            row_cursor += 1
+                if acc.get("confidence") == "low":
+                    c.fill = YELLOW
+            detail_end = row_cursor
 
-        elif kind == "formula":
-            label = ws.cell(row=row_cursor, column=2, value=code)
-            if entry.get("bold"):
-                label.font = BOLD
-            sum_rows[code] = row_cursor
-            formula_deferrals.append({"code": code, "row": row_cursor,
-                                      "bold": entry.get("bold", False)})
-            row_cursor += 1
+        # Summen-Zeile befüllen
+        for col_idx, col in enumerate(columns):
+            target_col = 3 + col_idx
+            col_letter = get_column_letter(target_col)
+            if col["kind"] == "bwa":
+                # BWA: direkter Wert aus column_sums
+                bwa_val = g.get("column_sums", {}).get(col_idx)
+                c = ws.cell(row=sum_row, column=target_col, value=bwa_val)
+            elif has_children:
+                # Parent-Gruppe ohne eigene Accounts → Summe über Sub-Summen.
+                # Sub-Summen werden später vollständig eingetragen; wir speichern
+                # den nötigen Formula-Aufbau für einen späteren Pass.
+                c = ws.cell(row=sum_row, column=target_col, value=None)
+            else:
+                # JA: SUM über den Detail-Bereich
+                if detail_end >= detail_start:
+                    formula = f"=SUM({col_letter}{detail_start}:{col_letter}{detail_end})"
+                    c = ws.cell(row=sum_row, column=target_col, value=formula)
+                else:
+                    c = ws.cell(row=sum_row, column=target_col, value=0)
+            c.number_format = EUR_FORMAT
+            c.font = BOLD if not is_sub else BOLD_LIGHT
 
-    # Pass 2 — fill deferred formulas now that all sum rows are known.
-    _write_computed_formulas(ws, sum_rows, detail_ranges, years)
+        row_cursor += 1
 
-    # EBITDA-Block — zwei Ansätze + Check
+    # Pass 2: Parent-Gruppen-Summen, die über Sub-Summen gehen
+    for parent_name, children_names in children_by_parent.items():
+        parent_row = group_sum_rows.get(parent_name)
+        if parent_row is None:
+            continue
+        for col_idx, col in enumerate(columns):
+            target_col = 3 + col_idx
+            col_letter = get_column_letter(target_col)
+            # Wenn Zelle schon einen Wert hat (BWA-Fall), nicht überschreiben
+            current = ws.cell(row=parent_row, column=target_col).value
+            if current is not None:
+                continue
+            child_refs = [f"{col_letter}{group_sum_rows[cn]}"
+                          for cn in children_names if cn in group_sum_rows]
+            if not child_refs:
+                formula = "=0"
+            else:
+                formula = "=" + "+".join(child_refs)
+            c = ws.cell(row=parent_row, column=target_col, value=formula)
+            c.number_format = EUR_FORMAT
+            c.font = BOLD
+
+    # Leerzeile
     row_cursor += 1
-    ebitda_topdown_row, ebitda_bottomup_row, ebitda_check_row = _write_ebitda_block(
-        ws, sum_rows, detail_ranges, years, row_cursor
-    )
-    row_cursor = ebitda_check_row + 2
 
-    # Kennzahlen
-    row_cursor += 2
-    ws.cell(row=row_cursor, column=2, value="Kennzahlen").font = BOLD
-    row_cursor += 1
-    anchors = _kennzahlen_anchors(sum_rows, ebitda_topdown_row=ebitda_topdown_row)
-    kz_first_row = row_cursor
-    for y_idx, _year in enumerate(years):
-        col_idx = 2 + y_idx  # 0-based for formulas.cell()
-        kz_rows = build_kennzahlen_rows(anchors, col_idx=col_idx)
-        for kz_idx, kz in enumerate(kz_rows):
-            target_row = kz_first_row + kz_idx
-            if y_idx == 0:
-                ws.cell(row=target_row, column=2, value=kz["label"])
-            if kz["formula"]:
-                c = ws.cell(row=target_row, column=col_idx + 1, value=kz["formula"])
-                c.number_format = kz["number_format"]
-    row_cursor = kz_first_row + 5  # 5 Kennzahlen
+    # Jahresergebnis-Zeile: Summe aller Top-Level-Gruppen (sub_group_of is None)
+    # unter Berücksichtigung von Gruppen-Typ und sign_convention der jeweiligen Spalte.
+    je_row = row_cursor
+    ws.cell(row=je_row, column=2, value="Jahresergebnis").font = BOLD
+    for col_idx, col in enumerate(columns):
+        target_col = 3 + col_idx
+        col_letter = get_column_letter(target_col)
+        conv = col.get("sign_convention", "expenses_negative")
+        parts_plus: list[int] = []
+        parts_minus: list[int] = []
+        for g in groups:
+            if g.get("sub_group_of") is not None:
+                continue  # nur Top-Level summieren
+            gtype = g.get("type", "neutral")
+            sum_r = group_sum_rows.get(g["name"])
+            if sum_r is None:
+                continue
+            if conv == "expenses_negative":
+                # Alles addieren — Aufwände sind eh negativ
+                parts_plus.append(sum_r)
+            else:
+                # Erträge plus, Aufwände/Steuern minus
+                if gtype == "ertrag":
+                    parts_plus.append(sum_r)
+                elif gtype in ("aufwand", "steuer"):
+                    parts_minus.append(sum_r)
+                else:
+                    parts_plus.append(sum_r)
+        if not parts_plus and not parts_minus:
+            formula = "=0"
+        else:
+            plus = "+".join(f"{col_letter}{r}" for r in parts_plus) or "0"
+            minus = ""
+            if parts_minus:
+                minus = "-" + "-".join(f"{col_letter}{r}" for r in parts_minus)
+            formula = f"={plus}{minus}"
+        c = ws.cell(row=je_row, column=target_col, value=formula)
+        c.number_format = EUR_FORMAT
+        c.font = BOLD
 
-    # Column widths
+    # Spaltenbreiten
     ws.column_dimensions["A"].width = 10
-    ws.column_dimensions["B"].width = 50
-    for i in range(len(years)):
-        ws.column_dimensions[get_column_letter(3 + i)].width = 15
+    ws.column_dimensions["B"].width = 55
+    for idx in range(len(columns)):
+        ws.column_dimensions[get_column_letter(3 + idx)].width = 14
 
     # Fragen-Sheet
     fragen = wb.create_sheet("Fragen")
     fragen.append(["Thema", "Details"])
     for q in consolidated.get("questions", []):
-        fragen.append([q.get("type", ""), str(q)])
-    for u in unmatched:
-        fragen.append([
-            "unmatched_group",
-            f"Konto {u.get('konto_nr') or '(ohne Nr)'}: '{u.get('bezeichnung')}' "
-            f"— Gruppe '{u.get('gruppe')}' nicht in HGB-Gliederung erkennbar"
-        ])
+        details = _format_question(q)
+        fragen.append([q.get("type", ""), details])
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-# -----------------------------------------------------------------------------
+def _apply_review_answers(groups: list[dict], questions: list[dict],
+                          review_answers: dict) -> list[dict]:
+    """Route accounts from open_questions into the user-chosen group."""
+    if not review_answers:
+        return groups
 
+    # Index für schnelles Gruppen-Lookup
+    groups_by_name = {g["name"]: g for g in groups}
 
-def _bilanzgewinn_synthetic_rows(bilanzgewinn_per_year: dict[int, dict]) -> list[dict]:
-    """Create synthetic detail rows for Gewinnvortrag and Ausschüttung so the
-    Bilanzgewinn-Formel has real values to reference. Verlustvortrag reduces
-    the Gewinnvortrag net value."""
-    if not bilanzgewinn_per_year:
-        return []
-    vortrag_values: dict[int, float] = {}
-    aus_values: dict[int, float] = {}
-    for year, bg in bilanzgewinn_per_year.items():
-        vortrag_values[year] = bg.get("gewinnvortrag", 0.0) - bg.get("verlustvortrag", 0.0)
-        aus_values[year] = bg.get("ausschuettung", 0.0)
-    return [
-        {"konto_nr": None, "bezeichnung": "Gewinn-/Verlustvortrag aus Vorjahr",
-         "gruppe": "15. Gewinn-/Verlustvortrag", "values": vortrag_values,
-         "confidence": "high"},
-        {"konto_nr": None, "bezeichnung": "Ausschüttung",
-         "gruppe": "16. Ausschüttung", "values": aus_values,
-         "confidence": "high"},
-    ]
-
-
-def _apply_review(rows: list[dict], review_answers: dict) -> list[dict]:
-    """Overlay user review corrections onto the extracted rows."""
-    out = []
-    for r in rows:
-        key = r.get("konto_nr") or r["bezeichnung"]
-        if key in review_answers:
-            r = {**r, "gruppe": review_answers[key], "confidence": "reviewed"}
-        out.append(r)
-    return out
-
-
-GROUP_COARSE_TO_DETAIL = {
-    "4. Materialaufwand": "4a. Aufwendungen für RHB und Waren",
-    "5. Personalaufwand": "5a. Löhne und Gehälter",
-    "7. Sonstige betriebliche Aufwendungen": "7g. Verschiedene betriebliche Kosten",
-}
-
-
-def _index_by_group(rows: list[dict], unmatched: list[dict]) -> dict[str, list[dict]]:
-    """Group rows by their canonical HGB code.
-
-    If Claude returns a coarse group (e.g. "4. Materialaufwand" without a/b
-    subdivision), route into the most-likely detail-bucket so the account is
-    not lost. If the group matches a code marked as "formula" only (no details
-    block), also reroute. Truly unmatched rows are appended to `unmatched`
-    and later surface in the Fragen-Sheet.
-    """
-    detail_codes = {e["code"] for e in GUV_HIERARCHY if e["kind"] == "details"}
-
-    by_group: dict[str, list[dict]] = {}
-    for r in rows:
-        canonical = match_code(r.get("gruppe"))
-        if canonical is None:
-            unmatched.append({"konto_nr": r.get("konto_nr"),
-                              "bezeichnung": r.get("bezeichnung"),
-                              "gruppe": r.get("gruppe")})
+    for q in questions:
+        if q.get("type") != "unmatched_account":
             continue
-        # Reroute groups that land on a formula-only row (no details block)
-        if canonical not in detail_codes:
-            rerouted = GROUP_COARSE_TO_DETAIL.get(canonical)
-            if rerouted:
-                canonical = rerouted
-            else:
-                unmatched.append({"konto_nr": r.get("konto_nr"),
-                                  "bezeichnung": r.get("bezeichnung"),
-                                  "gruppe": r.get("gruppe")})
-                continue
-        by_group.setdefault(canonical, []).append(r)
-    return by_group
+        konto_nr = q.get("konto_nr")
+        if not konto_nr or konto_nr not in review_answers:
+            continue
+        target_name = review_answers[konto_nr]
+        target = groups_by_name.get(target_name)
+        if target is None:
+            continue
+        # Wir haben hier nur einen Einzelwert (betrag_gj). Column-Index 0 annehmen
+        # wenn Spalten bekannt sind — aber hier fehlt der Kontext. Review-Accounts
+        # werden aktuell nur mit betrag_gj aus dem Dokument der jüngsten JA geroutet.
+        # TODO: falls Multi-Jahr-Review nötig, müsste q eine column-Liste mitbringen.
+        acc_key = f"reviewed:{konto_nr}"
+        acc = {
+            "konto_nr": konto_nr,
+            "bezeichnung": q.get("bezeichnung", ""),
+            "values": {0: q.get("betrag_gj")},
+            "confidence": "reviewed",
+        }
+        target.setdefault("accounts", []).append(acc)
+
+    return groups
 
 
-def _write_computed_formulas(ws, anchors: dict[str, int],
-                              detail_ranges: dict[str, tuple[int, int]],
-                              years: list[int]) -> None:
-    """Fill in the cascade formulas that depend on other sum rows:
-    2. Gesamtleistung, 4. Materialaufwand, 5. Personalaufwand,
-    7. Sonstige betr. Aufwendungen, 12. Ergebnis nach Steuern,
-    14. Jahresüberschuss, 17. Bilanzgewinn."""
-    for y_idx in range(len(years)):
-        col = 3 + y_idx
-        col_idx = col - 1  # 0-based
-
-        def ref(code: str) -> str:
-            return safe_ref(col_idx, anchors.get(code))
-
-        def ref_details_sum(code: str) -> str:
-            """For groups without a sum row (7c-g), sum the detail range directly."""
-            rng = detail_ranges.get(code)
-            if rng is None:
-                return "0"
-            return sum_range(col_idx, rng[0], rng[1])[1:]  # strip leading "="
-
-        # 2. Gesamtleistung = 1. Umsatzerlöse (simplified)
-        if (r := anchors.get("2. Gesamtleistung")) is not None:
-            c = ws.cell(row=r, column=col, value=f"={ref('1. Umsatzerlöse')}")
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-        # 4. Materialaufwand = 4a + 4b
-        if (r := anchors.get("4. Materialaufwand")) is not None:
-            formula = (f"={ref('4a. Aufwendungen für RHB und Waren')}"
-                       f"+{ref('4b. Aufwendungen für bezogene Leistungen')}")
-            c = ws.cell(row=r, column=col, value=formula)
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-        # 5. Personalaufwand = 5a + 5b
-        if (r := anchors.get("5. Personalaufwand")) is not None:
-            formula = f"={ref('5a. Löhne und Gehälter')}+{ref('5b. Soziale Abgaben')}"
-            c = ws.cell(row=r, column=col, value=formula)
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-        # 7. Sonstige betr. Aufwendungen = 7a-sum + 7b-sum + 7c-g details
-        # (7c-g haben nur details, keine eigene sum row — daher direkt SUM über ihre
-        #  detail-ranges).
-        if (r := anchors.get("7. Sonstige betriebliche Aufwendungen")) is not None:
-            parts = [ref("7a. Raumkosten"),
-                     ref("7b. Versicherungen, Beiträge und Abgaben"),
-                     ref_details_sum("7c. Reparaturen und Instandhaltungen"),
-                     ref_details_sum("7d. Fahrzeugkosten"),
-                     ref_details_sum("7e. Werbe- und Reisekosten"),
-                     ref_details_sum("7f. Kosten der Warenabgabe"),
-                     ref_details_sum("7g. Verschiedene betriebliche Kosten")]
-            formula = "=" + "+".join(parts)
-            c = ws.cell(row=r, column=col, value=formula)
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-        # 12. Ergebnis nach Steuern
-        if (r := anchors.get("12. Ergebnis nach Steuern")) is not None:
-            formula = (
-                f"={ref('2. Gesamtleistung')}+{ref('3. Sonstige betriebliche Erträge')}"
-                f"-{ref('4. Materialaufwand')}-{ref('5. Personalaufwand')}"
-                f"-{ref('6. Abschreibungen')}-{ref('7. Sonstige betriebliche Aufwendungen')}"
-                f"-{ref('11. Steuern vom Einkommen und vom Ertrag')}"
-            )
-            c = ws.cell(row=r, column=col, value=formula)
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-        # 14. Jahresüberschuss = Ergebnis n. Steuern - Sonstige Steuern
-        if (r := anchors.get("14. Jahresüberschuss")) is not None:
-            # "13. Sonstige Steuern" only has a details block, no sum row — we
-            # use safe_ref which falls back to 0 if not present.
-            formula = f"={ref('12. Ergebnis nach Steuern')}-{ref('13. Sonstige Steuern')}"
-            c = ws.cell(row=r, column=col, value=formula)
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-        # 17. Bilanzgewinn = JÜ + SUM(Vortrag-range) - SUM(Ausschüttung-range)
-        # 15./16. sind detail-only Gruppen (kein sum row), daher über detail_ranges.
-        if (r := anchors.get("17. Bilanzgewinn")) is not None:
-            vortrag = ref_details_sum("15. Gewinn-/Verlustvortrag")
-            aussch = ref_details_sum("16. Ausschüttung")
-            formula = f"={ref('14. Jahresüberschuss')}+{vortrag}-{aussch}"
-            c = ws.cell(row=r, column=col, value=formula)
-            c.number_format = EUR_FORMAT
-            c.font = BOLD
-
-
-def _write_ebitda_block(
-    ws,
-    sum_rows: dict[str, int],
-    detail_ranges: dict[str, tuple[int, int]],
-    years: list[int],
-    start_row: int,
-) -> tuple[int, int, int]:
-    """Write two EBITDA calculations (Top-Down + Bottom-Up) plus a diff-check.
-
-    Top-Down  = Gesamtleistung + Sonst. betr. Erträge - Materialaufwand
-                - Personalaufwand - Sonst. betr. Aufw.
-    Bottom-Up = Jahresüberschuss + Steuern vom Einkommen + Sonstige Steuern
-                + Zinsen Aufw. - Erträge Wertpapiere - Sonstige Zinsen Erträge
-                + Abschreibungen
-
-    Returns (top_row, bottom_row, check_row).
-    """
-    # Header
-    header = ws.cell(row=start_row, column=2, value="EBITDA-Überleitung")
-    header.font = BOLD
-    top_row = start_row + 1
-    bottom_row = start_row + 2
-    check_row = start_row + 3
-
-    ws.cell(row=top_row, column=2, value="EBITDA (Top-Down)").font = BOLD
-    ws.cell(row=bottom_row, column=2, value="EBITDA (Bottom-Up)").font = BOLD
-    ws.cell(row=check_row, column=2, value="Check (Differenz)").font = BOLD
-
-    for y_idx in range(len(years)):
-        col = 3 + y_idx
-        col_idx = col - 1
-
-        def ref(code: str) -> str:
-            return safe_ref(col_idx, sum_rows.get(code))
-
-        def ref_details(code: str) -> str:
-            rng = detail_ranges.get(code)
-            if rng is None:
-                return "0"
-            return sum_range(col_idx, rng[0], rng[1])[1:]
-
-        # Top-Down EBITDA
-        top_formula = (
-            f"={ref('2. Gesamtleistung')}"
-            f"+{ref('3. Sonstige betriebliche Erträge')}"
-            f"-{ref('4. Materialaufwand')}"
-            f"-{ref('5. Personalaufwand')}"
-            f"-{ref('7. Sonstige betriebliche Aufwendungen')}"
-        )
-        c = ws.cell(row=top_row, column=col, value=top_formula)
-        c.number_format = EUR_FORMAT
-        c.font = BOLD
-
-        # Bottom-Up EBITDA
-        bottom_formula = (
-            f"={ref('14. Jahresüberschuss')}"
-            f"+{ref('11. Steuern vom Einkommen und vom Ertrag')}"
-            f"+{ref_details('13. Sonstige Steuern')}"
-            f"+{ref_details('10. Zinsen und ähnliche Aufwendungen')}"
-            f"-{ref_details('8. Erträge aus Wertpapieren')}"
-            f"-{ref_details('9. Sonstige Zinsen und ähnliche Erträge')}"
-            f"+{ref('6. Abschreibungen')}"
-        )
-        c = ws.cell(row=bottom_row, column=col, value=bottom_formula)
-        c.number_format = EUR_FORMAT
-        c.font = BOLD
-
-        # Check = Differenz (sollte 0 sein)
-        from openpyxl.utils import get_column_letter
-        letter = get_column_letter(col)
-        check_formula = f"={letter}{top_row}-{letter}{bottom_row}"
-        c = ws.cell(row=check_row, column=col, value=check_formula)
-        c.number_format = EUR_FORMAT
-        c.font = BOLD
-        # Conditional: rot färben wenn |diff| > 1 EUR
-        # (einfacher: immer als rote Zelle markieren falls der Wert != 0;
-        #  hier ohne Conditional Formatting via openpyxl — der User sieht die Zahl)
-
-    return (top_row, bottom_row, check_row)
-
-
-def _kennzahlen_anchors(sum_rows: dict[str, int],
-                        ebitda_topdown_row: int | None = None) -> dict[str, int | None]:
-    return {
-        "umsatz_row": sum_rows.get("1. Umsatzerlöse"),
-        "material_row": sum_rows.get("4. Materialaufwand"),
-        "personal_row": sum_rows.get("5. Personalaufwand"),
-        "jue_row": sum_rows.get("14. Jahresüberschuss"),
-        "ebitda_row": ebitda_topdown_row,
-    }
+def _format_question(q: dict) -> str:
+    t = q.get("type", "")
+    if t == "previous_year_mismatch":
+        return (f"Gruppe {q.get('group')} · Konto {q.get('konto_nr')} · "
+                f"Jahr {q.get('year')}: "
+                f"PDF {q.get('from_doc_year')} sagt {q.get('pdf_says')}, "
+                f"eigene Extraktion {q.get('own_value')}")
+    if t == "group_sum_mismatch":
+        return (f"Gruppe {q.get('group')} · Jahr {q.get('year')}: "
+                f"PDF-Summe {q.get('pdf_says')} ≠ Konten-Summe {q.get('accounts_sum')}")
+    if t == "unmatched_account":
+        return (f"Konto {q.get('konto_nr') or '(ohne Nr)'} · "
+                f"'{q.get('bezeichnung')}' · Jahr {q.get('year')} · "
+                f"Betrag {q.get('betrag_gj')} — {q.get('hint', '')}")
+    return str(q)
