@@ -3,8 +3,8 @@
 {% block content %}
 <div id="job-state"
      hx-get="/job/{{ job.id }}/status"
-     hx-trigger="load, every 3s"
-     hx-swap="innerHTML">
+     hx-trigger="load"
+     hx-swap="outerHTML">
   <div class="bg-white rounded-lg shadow-sm border p-8 text-center">
     <p class="text-slate-600">Laden …</p>
   </div>

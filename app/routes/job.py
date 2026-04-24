@@ -3,9 +3,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import JobsRepo
+from app.excel.structure import GUV_HIERARCHY
 from app.models import JobStatus
 from app.routes.pages import require_auth
 from app.worker.tasks import finalize_job
+
+# Ordered list of detail-group codes — what the user can pick in the review dropdown
+ALL_DETAIL_GROUPS = [e["code"] for e in GUV_HIERARCHY if e["kind"] == "details"]
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -48,6 +52,7 @@ def job_status(request: Request, job_id: str):
     return templates.TemplateResponse(request, partial, {
         "job": job,
         "status_label": STATUS_LABELS.get(job.status, ""),
+        "all_detail_groups": ALL_DETAIL_GROUPS,
     })
 
 
