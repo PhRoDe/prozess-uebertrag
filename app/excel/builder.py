@@ -206,28 +206,30 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
 
 def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
-    """Korrigiert semantische Missklassifikationen aus der Claude-Extraktion.
+    """Korrigiert semantische Missklassifikationen aus der Claude-Extraktion
+    und filtert Nicht-GuV-Positionen aus.
 
     GKV §275 Pos 2: 'Erhöhung ODER Verminderung des Bestandes an fertigen und
     unfertigen Erzeugnissen'. PDFs labeln das oft als 'Verminderung' mit positivem
     Wert — dann ist die Position real ein Aufwand.
 
-    'Gewinnvortrag', 'Verlustvortrag', 'Bilanzgewinn' gehören nicht in den
-    Jahresüberschuss — sie kommen NACH dem JÜ in der Bilanzgewinn-Rechnung.
-    Wir markieren sie mit type='bilanz' damit der Jahresergebnis-Formelbau
-    sie überspringt.
+    'Gewinnvortrag', 'Verlustvortrag', 'Bilanzgewinn', 'Bilanzverlust',
+    'Ausschüttung' sind Eigenkapital-Bewegungen (Bilanzgewinn-Rechnung), NICHT
+    Teil der GuV. Der Uebertrag zeigt nur die GuV → diese Gruppen komplett
+    ausfiltern.
     """
     out = []
     for g in groups:
         name_lc = (g.get("name") or "").lower()
+        # Bilanz-Positionen komplett ausfiltern (nicht Teil der GuV)
+        if any(k in name_lc for k in ["gewinnvortrag", "verlustvortrag",
+                                       "bilanzgewinn", "bilanzverlust",
+                                       "ausschüttung"]):
+            continue
         if "verminderung" in name_lc and "bestand" in name_lc:
             out.append({**g, "type": "aufwand"})
         elif "erhöhung" in name_lc and "bestand" in name_lc:
             out.append({**g, "type": "ertrag"})
-        elif any(k in name_lc for k in ["gewinnvortrag", "verlustvortrag",
-                                         "bilanzgewinn", "bilanzverlust",
-                                         "ausschüttung"]):
-            out.append({**g, "type": "bilanz"})
         else:
             out.append(g)
     return out

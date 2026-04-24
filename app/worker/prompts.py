@@ -74,6 +74,11 @@ REGELN:
     erkennbare Gruppe hat oder Claude unsicher ist, kommt es in
     `open_questions`. Das ist der Ausnahmefall.
 
+11. **Stoppe beim Jahresüberschuss** (bzw. Jahresfehlbetrag). Positionen
+    danach — Gewinnvortrag/Verlustvortrag aus dem Vorjahr, Ausschüttung,
+    Bilanzgewinn/-verlust — gehören in die Bilanzgewinn-Rechnung, NICHT
+    in die GuV. Diese Gruppen NIEMALS extrahieren.
+
 RÜCKGABEFORMAT:
 
 {
