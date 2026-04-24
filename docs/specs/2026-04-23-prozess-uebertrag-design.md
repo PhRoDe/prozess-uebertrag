@@ -1,14 +1,37 @@
 ---
 title: Prozess-Übertrag — Web-App für GuV-Extraktion
 type: spec
-status: draft
+status: shipped-with-pivot
 created: 2026-04-23
-updated: 2026-04-23
+updated: 2026-04-24
 owner: Philipp Degen
 related:
   - /skills/guv-uebertrag/SKILL.md
   - ./docs/exploration/htmx-demo.html
 ---
+
+> **⚠️ Architektur-Pivot am 2026-04-24:**
+>
+> Die Sektionen unten beschreiben das Original-Design mit fester HGB-§275-
+> Gliederung. Nach Vergleich mit echten handgepflegten Excel-Arbeitsdokumenten
+> des Users (mymonthlys + Gewürze) wurde der Ansatz umgestellt:
+>
+> - **Die Gruppenstruktur der Excel kommt nicht mehr aus einer festen
+>   HGB-Hierarchie, sondern wird vom Claude 1:1 aus der PDF übernommen.**
+> - Werte behalten ihr Vorzeichen wie in der PDF.
+> - EBITDA-Überleitung, Kennzahlen-Block und Bilanzgewinn-Zeilen wurden
+>   entfernt ("nur der Übertrag, keine Analyse").
+> - `app/excel/structure.py`, `kennzahlen.py`, `formulas.py` entfernt.
+> - Jahresergebnis = `SUM` aller Gruppen-Summen, je nach `sign_convention`
+>   der Quellspalte entweder direkt oder mit `Erträge − Aufwände`.
+>
+> Siehe Commit `c0c9714` für den Code-Stand, `CLAUDE.md` für die
+> aktuelle Architektur.
+>
+> Die unten beschriebenen Sektionen 4 (verformelte Excel), 5 (Architektur),
+> 6 (Data Flow) sind im Kern noch korrekt, aber die GuV-Struktur in
+> Section 4 ist jetzt dynamisch statt fest.
+
 
 # Prozess-Übertrag — Design-Spec
 
