@@ -24,8 +24,11 @@ def test_vision_prompt_extends_text_prompt():
     assert "Scan" in EXTRACTION_PROMPT_VISION
 
 
-def test_bwa_prompt_returns_flat_positions():
-    assert "positions" in BWA_PROMPT
+def test_bwa_prompt_returns_structured_groups():
+    # BWA nutzt jetzt dieselbe Struktur wie JA (groups mit accounts),
+    # damit Multi-Jahres-Matching ueber Kontonummer funktioniert.
+    assert "groups" in BWA_PROMPT
+    assert "accounts" in BWA_PROMPT
     assert "period_label" in BWA_PROMPT
 
 

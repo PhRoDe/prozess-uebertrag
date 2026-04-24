@@ -133,21 +133,49 @@ Bei unsicheren Ziffern: confidence="low" setzen. Niemals raten."""
 
 
 BWA_PROMPT = """Du extrahierst eine Betriebswirtschaftliche Auswertung (BWA).
-BWAs enthalten nur Hauptpositionen, keine Einzelkonten.
+
+BWAs können zwei Varianten haben:
+  A) Nur Hauptpositionen mit Jahres-Summen (klassische Kurz-BWA)
+  B) Detaillierte Aufschlüsselung mit Kontonummern + Einzelbeträgen, oft
+     mit Monats-Spalten plus einer Jahres-Summenspalte
+
+In BEIDEN Fällen gibst du die selbe Struktur zurück wie beim Jahresabschluss:
+groups mit optional accounts. Aus Monats-BWAs nimmst du NUR die
+Jahres-Summenspalte (typisch die letzte Spalte, oft mit Label
+'Jan - Dez' oder '01-12').
+
+REGELN:
+1. Gruppennamen wie in der BWA (nicht normalisieren)
+2. Konten mit Nummer + Bezeichnung + Jahres-Summe extrahieren wenn vorhanden
+3. Vorzeichen wie im PDF (Aufwände können positiv oder negativ sein)
+4. Jede Gruppe als ertrag/aufwand/steuer/neutral klassifizieren
+5. sign_convention erkennen
+6. Stoppe beim Jahresüberschuss/Jahresergebnis. Bilanzgewinn-Positionen
+   (Gewinnvortrag, Ausschüttung, Bilanzgewinn) NICHT extrahieren.
 
 RÜCKGABEFORMAT (JSON):
 
 {
   "type": "bwa",
-  "period_label": "BWA 2024",
-  "year": 2024,
-  "sign_convention": "expenses_negative",
-  "positions": [
-    {"name": "Umsatzerlöse", "type": "ertrag", "betrag": 1234567.89},
-    {"name": "Materialaufwand", "type": "aufwand", "betrag": -400000.00},
-    {"name": "Personalaufwand", "type": "aufwand", "betrag": -160000.00}
-  ]
+  "period_label": "BWA 2025",
+  "year": 2025,
+  "sign_convention": "expenses_positive",
+  "groups": [
+    {
+      "name": "Umsatzerlöse",
+      "type": "ertrag",
+      "pdf_sum_gj": 10433317.27,
+      "sub_group_of": null,
+      "accounts": [
+        {"konto_nr": "4400", "bezeichnung": "Projektumsätze 19% USt",
+         "betrag_gj": 10407762.63, "confidence": "high"}
+      ]
+    }
+  ],
+  "open_questions": []
 }
 
-Gruppennamen so übernehmen wie in der BWA. Vorzeichen wie im PDF.
+Bei Kurz-BWA ohne Einzelkonten: accounts leer lassen, pdf_sum_gj aus der
+BWA-Zwischensumme nehmen.
+
 Antworte AUSSCHLIESSLICH mit gültigem JSON."""

@@ -221,13 +221,65 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
         })
 
 
-def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict):
-    """BWA hat nur Summen pro Gruppe, keine Konten-Details."""
-    for p in doc.get("positions", []):
-        target = groups_by_name.get(p["name"])
-        if target is None:
-            continue
-        target["column_sums"][col_idx] = p.get("betrag")
+def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict,
+                group_template: list = None):
+    """BWA wird wie JA behandelt: groups mit accounts. Konten werden **per
+    Kontonummer** in bestehende Zeilen gemerged, unabhängig davon in welche
+    Gruppe die BWA sie einsortiert.
+
+    Beispiel: Tasteone BWA-Gruppe 'Material-/Wareneinkauf' mit Konto 5400,
+    JA-Gruppe 'Aufwendungen für Roh-, Hilfs- und Betriebsstoffe' mit Konto 5400.
+    Per Kontonummer-Merge landet 5400-Wert in der gleichen Excel-Zeile.
+    """
+    # Legacy-Struktur (flache positions) — behalten wir für Kompatibilität
+    if not doc.get("groups") and doc.get("positions"):
+        for p in doc["positions"]:
+            target = groups_by_name.get(p["name"])
+            if target is not None:
+                target["column_sums"][col_idx] = p.get("betrag")
+        return
+
+    # Neue Struktur: groups mit accounts
+    # Globalen konto_nr → group_name Index aufbauen
+    nr_to_group: dict[str, str] = {}
+    for gname, g in groups_by_name.items():
+        for acc in g["accounts_by_key"].values():
+            nr = acc.get("konto_nr")
+            if nr:
+                nr_to_group[str(nr)] = gname
+
+    for g in doc.get("groups", []):
+        bwa_gname = g["name"]
+        # Gruppen-Summe auf die Gruppe mit passendem Namen mappen (falls vorhanden)
+        if g.get("pdf_sum_gj") is not None:
+            t = groups_by_name.get(bwa_gname)
+            if t is not None:
+                t["column_sums"][col_idx] = g["pdf_sum_gj"]
+
+        for acc in g.get("accounts", []):
+            nr = acc.get("konto_nr")
+            nr_key = str(nr) if nr else None
+            # 1. Preferred: Konto existiert schon (aus JA) — direkt einhängen
+            target_gname = nr_to_group.get(nr_key) if nr_key else None
+            # 2. Fallback: Gruppe mit passendem Namen
+            if target_gname is None and bwa_gname in groups_by_name:
+                target_gname = bwa_gname
+            if target_gname is None:
+                continue  # kein Ort für das Konto → silently drop
+            target = groups_by_name[target_gname]
+            key = _acc_key(acc, target_gname)
+            if key not in target["accounts_by_key"]:
+                target["accounts_by_key"][key] = {
+                    "konto_nr": nr,
+                    "bezeichnung": acc.get("bezeichnung", ""),
+                    "values": {},
+                    "confidence": acc.get("confidence", "high"),
+                }
+                target["account_order"].append(key)
+                # Index aktualisieren für folgende Accounts
+                if nr_key:
+                    nr_to_group[nr_key] = target_gname
+            target["accounts_by_key"][key]["values"][col_idx] = acc.get("betrag_gj")
 
 
 def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
