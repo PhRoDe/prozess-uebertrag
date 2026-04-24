@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .env
 .env.local
+TEAM_CREDENTIALS.local.md
 tests/fixtures/*.pdf
 !tests/fixtures/README.md
 .ruff_cache/
