@@ -42,6 +42,11 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     groups = _apply_review_answers(groups, consolidated.get("questions", []),
                                     review_answers)
 
+    # Sign-convention aus ECHTEN Aufwands-Werten ableiten, statt Claude zu vertrauen.
+    # Claude klassifiziert die Convention inkonsistent zwischen PDFs des gleichen
+    # Steuerberaters. Datenbasis ist robuster.
+    columns = _infer_sign_conventions(columns, groups)
+
     # Header row
     ws.cell(row=1, column=1, value="Konto").font = BOLD
     ws.cell(row=1, column=2, value="Bezeichnung").font = BOLD
@@ -192,6 +197,38 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dict]:
+    """Leite sign_convention pro Spalte aus den echten Aufwand/Steuer-Werten ab.
+    Mehrheit negativ → expenses_negative (einfache Summen-Formel fürs Jahresergebnis).
+    Mehrheit positiv → expenses_positive (Aufwände müssen subtrahiert werden)."""
+    out = []
+    for col_idx, col in enumerate(columns):
+        new_col = dict(col)
+        samples: list[float] = []
+        for g in groups:
+            if g.get("type") not in ("aufwand", "steuer"):
+                continue
+            for acc in g.get("accounts", []):
+                v = acc.get("values", {}).get(col_idx)
+                if v is None:
+                    continue
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if abs(v) < 0.01:
+                    continue
+                samples.append(v)
+        if samples:
+            neg = sum(1 for v in samples if v < 0)
+            pos = len(samples) - neg
+            new_col["sign_convention"] = (
+                "expenses_negative" if neg >= pos else "expenses_positive"
+            )
+        out.append(new_col)
+    return out
 
 
 def _apply_review_answers(groups: list[dict], questions: list[dict],
