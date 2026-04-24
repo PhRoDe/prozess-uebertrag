@@ -8,9 +8,6 @@ from app.worker.prompts import (
     DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION, BWA_PROMPT,
 )
 
-MODEL = "claude-opus-4-7"
-MAX_TOKENS = 16000
-
 
 class ExtractionError(Exception):
     pass
@@ -20,6 +17,9 @@ class ClaudeClient:
     def __init__(self, sdk: Anthropic | None = None) -> None:
         s = get_settings()
         self.sdk = sdk or Anthropic(api_key=s.anthropic_api_key)
+        self.model = s.claude_model
+        self.max_tokens = s.claude_max_tokens
+        self.max_extract_chars = s.max_extract_chars
 
     def classify_document(self, text_or_sample: str) -> str:
         resp = self._call([
@@ -31,6 +31,11 @@ class ClaudeClient:
         return resp.strip().lower()
 
     def extract_text_pdf(self, text: str, is_bwa: bool = False) -> dict[str, Any]:
+        if len(text) > self.max_extract_chars:
+            raise ExtractionError(
+                f"PDF-Text zu lang ({len(text):,} Zeichen, Limit {self.max_extract_chars:,}). "
+                "Bitte kleinere PDF hochladen."
+            )
         prompt = BWA_PROMPT if is_bwa else EXTRACTION_PROMPT_TEXT
         raw = self._call([
             {"role": "user", "content": [
@@ -63,7 +68,7 @@ class ClaudeClient:
         for attempt in range(retries):
             try:
                 msg = self.sdk.messages.create(
-                    model=MODEL, max_tokens=MAX_TOKENS, messages=messages,
+                    model=self.model, max_tokens=self.max_tokens, messages=messages,
                 )
                 return msg.content[0].text
             except APIStatusError as e:

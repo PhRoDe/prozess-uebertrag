@@ -28,7 +28,9 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
         gj = e["year"]
         vj = e.get("previous_year")
         for acc in e["accounts"]:
-            key = acc["konto_nr"] or f"__nrless__{acc['bezeichnung']}"
+            # When konto_nr is missing, include gruppe + bezeichnung to reduce
+            # false merges between similarly-named entries in different groups.
+            key = acc["konto_nr"] or f"__nrless__{acc.get('gruppe', '')}::{acc['bezeichnung']}"
             if key not in rows:
                 rows[key] = {
                     "konto_nr": acc["konto_nr"],

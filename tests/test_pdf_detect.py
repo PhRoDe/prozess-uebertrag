@@ -1,6 +1,7 @@
 import io
 import fitz
-from app.worker.pdf_detect import classify_pdf, pdf_to_images, extract_text, PdfKind
+import pytest
+from app.worker.pdf_detect import classify_pdf, pdf_to_images, extract_text, PdfKind, PdfError
 
 
 def make_text_pdf(lines: list[str] | None = None):
@@ -50,3 +51,19 @@ def test_extract_text_includes_page_markers():
     assert "=== Seite 1 ===" in text
     assert "=== Seite 2 ===" in text
     assert "Hello World" in text
+
+
+def test_encrypted_pdf_raises_pdferror():
+    doc = fitz.open()
+    doc.new_page()
+    buf = io.BytesIO()
+    doc.save(buf, encryption=fitz.PDF_ENCRYPT_AES_256,
+             owner_pw="owner", user_pw="user")
+    doc.close()
+    with pytest.raises(PdfError, match="passwortgeschützt"):
+        classify_pdf(buf.getvalue())
+
+
+def test_non_pdf_bytes_raise_pdferror():
+    with pytest.raises(PdfError):
+        classify_pdf(b"this is not a pdf")

@@ -48,6 +48,16 @@ def test_extract_raises_on_invalid_json():
         client.extract_text_pdf("text")
 
 
+def test_extract_text_pdf_rejects_oversized_input():
+    sdk = make_mock_sdk("{}")
+    client = ClaudeClient(sdk=sdk)
+    huge_text = "x" * (client.max_extract_chars + 1)
+    with pytest.raises(ExtractionError, match="zu lang"):
+        client.extract_text_pdf(huge_text)
+    # SDK was never called
+    sdk.messages.create.assert_not_called()
+
+
 def test_extract_scan_pdf_sends_base64_images():
     payload = {"type": "jahresabschluss", "year": 2024, "accounts": []}
     sdk = make_mock_sdk(json.dumps(payload))

@@ -1,8 +1,6 @@
 """Prompts für Claude-basierte Extraktion.
 Die HGB-§275-Gliederung stammt aus skills/guv-uebertrag/SKILL.md."""
 
-import json
-
 GUV_STRUKTUR = """
 1.  Umsatzerlöse
 2.  Gesamtleistung
@@ -91,34 +89,3 @@ Rückgabeformat: JSON
 
 Antworte AUSSCHLIESSLICH mit gültigem JSON."""
 
-
-def build_consolidation_prompt(extractions: list[dict]) -> str:
-    """Build a prompt that asks Claude to merge multi-year extractions."""
-    docs_json = json.dumps(extractions, ensure_ascii=False, indent=2)
-    return f"""Du bekommst Extraktionen aus mehreren Jahren und sollst sie zu einer
-konsolidierten Mehrjahres-Tabelle zusammenführen.
-
-Regeln:
-- Vereinigungsmenge aller Konten über alle Jahre bilden
-- Pro Konto: ein Eintrag mit Werten pro Jahr (leer wenn in dem Jahr nicht vorhanden)
-- Cross-Check: Vorjahreswerte aus PDF(n) müssen mit PDF(n-1) übereinstimmen —
-  bei Abweichung in "questions" listen
-- Gruppenreihenfolge nach HGB §275 GKV beibehalten
-
-Dokumente:
-{docs_json}
-
-Rückgabeformat: JSON
-{{
-  "years": [2022, 2023, 2024],
-  "rows": [
-    {{"konto_nr": "8400", "bezeichnung": "Erlöse 19% USt",
-      "gruppe": "1. Umsatzerlöse", "values": {{"2022": 1000000, "2023": 1100000, "2024": 1279228.53}}}}
-  ],
-  "questions": [
-    {{"type": "previous_year_mismatch", "konto_nr": "8400",
-      "year": 2023, "pdf2024_says": 1110030.20, "pdf2023_says": 1115000.00}}
-  ]
-}}
-
-Antworte AUSSCHLIESSLICH mit gültigem JSON."""

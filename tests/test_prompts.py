@@ -1,6 +1,6 @@
 from app.worker.prompts import (
     DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION,
-    BWA_PROMPT, build_consolidation_prompt,
+    BWA_PROMPT,
 )
 
 
@@ -23,13 +23,3 @@ def test_doctype_prompt_discriminates():
 def test_bwa_prompt_focuses_on_hauptpositionen():
     assert "BWA" in BWA_PROMPT
     assert "Hauptpositionen" in BWA_PROMPT
-
-
-def test_consolidation_prompt_includes_documents():
-    extractions = [
-        {"file": "ja-2023.pdf", "accounts": []},
-        {"file": "ja-2024.pdf", "accounts": []},
-    ]
-    prompt = build_consolidation_prompt(extractions)
-    assert "ja-2023.pdf" in prompt and "ja-2024.pdf" in prompt
-    assert "previous_year_mismatch" in prompt
