@@ -42,6 +42,10 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     groups = _apply_review_answers(groups, consolidated.get("questions", []),
                                     review_answers)
 
+    # "Verminderung" wirkt semantisch mindernd im Jahresergebnis (Bestandsabbau = Kosten).
+    # PDFs zeigen den Wert aber oft positiv → muss als aufwand gezählt werden.
+    groups = _reclassify_bestandsveraenderung(groups)
+
     # Sign-convention aus ECHTEN Aufwands-Werten ableiten, statt Claude zu vertrauen.
     # Claude klassifiziert die Convention inkonsistent zwischen PDFs des gleichen
     # Steuerberaters. Datenbasis ist robuster.
@@ -155,6 +159,8 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             if g.get("sub_group_of") is not None:
                 continue  # nur Top-Level summieren
             gtype = g.get("type", "neutral")
+            if gtype == "bilanz":
+                continue  # Gewinnvortrag/Bilanzgewinn sind NICHT Teil des JÜ
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
                 continue
@@ -197,6 +203,34 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
+    """Korrigiert semantische Missklassifikationen aus der Claude-Extraktion.
+
+    GKV §275 Pos 2: 'Erhöhung ODER Verminderung des Bestandes an fertigen und
+    unfertigen Erzeugnissen'. PDFs labeln das oft als 'Verminderung' mit positivem
+    Wert — dann ist die Position real ein Aufwand.
+
+    'Gewinnvortrag', 'Verlustvortrag', 'Bilanzgewinn' gehören nicht in den
+    Jahresüberschuss — sie kommen NACH dem JÜ in der Bilanzgewinn-Rechnung.
+    Wir markieren sie mit type='bilanz' damit der Jahresergebnis-Formelbau
+    sie überspringt.
+    """
+    out = []
+    for g in groups:
+        name_lc = (g.get("name") or "").lower()
+        if "verminderung" in name_lc and "bestand" in name_lc:
+            out.append({**g, "type": "aufwand"})
+        elif "erhöhung" in name_lc and "bestand" in name_lc:
+            out.append({**g, "type": "ertrag"})
+        elif any(k in name_lc for k in ["gewinnvortrag", "verlustvortrag",
+                                         "bilanzgewinn", "bilanzverlust",
+                                         "ausschüttung"]):
+            out.append({**g, "type": "bilanz"})
+        else:
+            out.append(g)
+    return out
 
 
 def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dict]:
