@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.auth import create_session_token, validate_session_token, verify_password
 from app.config import get_settings
+from app.ratelimit import allow as rate_allow
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -25,6 +26,11 @@ def login_page(request: Request):
 
 @router.post("/login")
 def login_submit(request: Request, password: str = Form(...)) -> Response:
+    # Fix: Brute-Force-Schutz, 10 Versuche pro 15 min pro IP
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_allow(f"login:{client_ip}", max_hits=10, window_seconds=900):
+        raise HTTPException(status_code=429,
+                            detail="Zu viele Login-Versuche. Bitte 15 min warten.")
     s = get_settings()
     if not verify_password(password, s.app_password_hash):
         return templates.TemplateResponse(

@@ -56,14 +56,15 @@ def extract_job(job_id: str) -> None:
         for input_file in job.input_files:
             data = storage.download_input(input_file.storage_path)
             kind = classify_pdf(data)
-            sample = extract_text(data)[:5000] if kind == PdfKind.TEXT else "SCAN-BILDDATEN"
-            doc_type = claude.classify_document(sample)
-            is_bwa = (doc_type == "bwa")
 
             if kind == PdfKind.TEXT:
                 full_text = extract_text(data)
+                doc_type = claude.classify_document(full_text[:5000])
+                is_bwa = (doc_type == "bwa")
                 extraction = claude.extract_text_pdf(full_text, is_bwa=is_bwa)
             else:
+                doc_type = claude.classify_document("SCAN-BILDDATEN")
+                is_bwa = (doc_type == "bwa")
                 pages = pdf_to_images(data)
                 extraction = claude.extract_scan_pdf(pages, is_bwa=is_bwa)
 

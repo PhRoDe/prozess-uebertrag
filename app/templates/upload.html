@@ -38,25 +38,42 @@
   });
   input.addEventListener('change', renderList);
 
+  const MAX_MB = 10;
+  const MAX_FILES = 10;
+
   function renderList() {
     const list = document.getElementById('file-list');
     list.textContent = '';
+    let hasError = false;
+    const tooMany = input.files.length > MAX_FILES;
     for (const f of input.files) {
+      const tooBig = f.size > MAX_MB * 1024 * 1024;
+      const notPdf = !f.name.toLowerCase().endsWith('.pdf');
+      if (tooBig || notPdf || tooMany) hasError = true;
       const div = document.createElement('div');
-      div.className = 'flex items-center justify-between p-3 bg-slate-50 rounded border';
+      div.className = 'flex items-center justify-between p-3 rounded border ' +
+                      (tooBig || notPdf ? 'bg-red-50 border-red-200' : 'bg-slate-50');
       const info = document.createElement('div');
       const name = document.createElement('p');
       name.className = 'text-sm font-medium';
       name.textContent = f.name;
       const size = document.createElement('p');
-      size.className = 'text-xs text-slate-500';
-      size.textContent = (f.size / 1024 / 1024).toFixed(1) + ' MB';
+      size.className = 'text-xs ' + (tooBig ? 'text-red-600' : 'text-slate-500');
+      size.textContent = (f.size / 1024 / 1024).toFixed(1) + ' MB'
+                       + (tooBig ? ' — zu groß (max ' + MAX_MB + ' MB)' : '')
+                       + (notPdf ? ' — keine PDF' : '');
       info.appendChild(name);
       info.appendChild(size);
       div.appendChild(info);
       list.appendChild(div);
     }
-    submit.disabled = input.files.length === 0;
+    if (tooMany) {
+      const warn = document.createElement('p');
+      warn.className = 'text-red-600 text-sm';
+      warn.textContent = 'Zu viele Dateien (max ' + MAX_FILES + ')';
+      list.appendChild(warn);
+    }
+    submit.disabled = input.files.length === 0 || hasError;
   }
 </script>
 {% endblock %}

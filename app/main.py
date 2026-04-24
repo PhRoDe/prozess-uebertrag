@@ -28,16 +28,17 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/health")
 def health():
-    """Fix 1C: detect paused Supabase and return clear message instead of 500."""
+    """Fix 1C: detect paused Supabase and return clear message instead of 500.
+    Keine internen Details leaken — nur Status + User-Anleitung."""
     try:
         JobsRepo().client.table("jobs").select("id").limit(1).execute()
         return {"status": "ok"}
     except Exception as e:
+        log.warning("Health check failed: %s", e)
         return JSONResponse(
             {"status": "error",
              "message": "Datenbank nicht erreichbar. Falls Supabase pausiert ist: "
-                        "im Dashboard aktivieren.",
-             "details": str(e)[:200]},
+                        "im Dashboard aktivieren."},
             status_code=503,
         )
 
