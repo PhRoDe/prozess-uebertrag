@@ -44,7 +44,8 @@ def test_extract_sets_review_needed_on_success():
          patch("app.worker.tasks.ClaudeClient") as Claude, \
          patch("app.worker.tasks.StorageClient") as Storage, \
          patch("app.worker.tasks.classify_pdf") as cls, \
-         patch("app.worker.tasks.extract_text", return_value="a lot of text " * 20):
+         patch("app.worker.tasks.extract_text", return_value="a lot of text " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV text"):
         repo = Repo.return_value
         repo.try_claim.return_value = True
         repo.get.return_value = make_job(status=JobStatus.UPLOADED)
@@ -54,7 +55,8 @@ def test_extract_sets_review_needed_on_success():
         claude = Claude.return_value
         claude.classify_document.return_value = "jahresabschluss"
         claude.extract_text_pdf.return_value = {
-            "type": "jahresabschluss", "year": 2024, "previous_year": 2023, "accounts": [],
+            "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+            "groups": [], "open_questions": [],
         }
         extract_job("job-1")
         repo.set_extraction.assert_called_once()

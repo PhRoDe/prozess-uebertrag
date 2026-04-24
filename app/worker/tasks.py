@@ -15,7 +15,7 @@ from app.models import JobStatus
 from app.storage import StorageClient
 from app.worker.claude_client import ClaudeClient, ExtractionError
 from app.worker.consolidate import merge_extractions
-from app.worker.pdf_detect import PdfKind, classify_pdf, extract_text, pdf_to_images
+from app.worker.pdf_detect import PdfKind, classify_pdf, extract_guv_section, extract_text, pdf_to_images
 
 log = logging.getLogger(__name__)
 
@@ -58,10 +58,17 @@ def extract_job(job_id: str) -> None:
             kind = classify_pdf(data)
 
             if kind == PdfKind.TEXT:
-                full_text = extract_text(data)
-                doc_type = claude.classify_document(full_text[:5000])
+                # Klassifikation auf Basis der ersten 5000 Zeichen (Titelseite)
+                doc_type = claude.classify_document(extract_text(data)[:5000])
                 is_bwa = (doc_type == "bwa")
-                extraction = claude.extract_text_pdf(full_text, is_bwa=is_bwa)
+                if is_bwa:
+                    # BWAs sind meist kurz → kompletter Text
+                    extraction = claude.extract_text_pdf(extract_text(data), is_bwa=True)
+                else:
+                    # JAs koennen 60+ Seiten haben → nur GuV-Kontennachweis an Claude.
+                    # Das spart Tokens und verhindert dass Claude den Fokus verliert.
+                    guv_text = extract_guv_section(data)
+                    extraction = claude.extract_text_pdf(guv_text, is_bwa=False)
             else:
                 doc_type = claude.classify_document("SCAN-BILDDATEN")
                 is_bwa = (doc_type == "bwa")

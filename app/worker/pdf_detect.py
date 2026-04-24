@@ -57,3 +57,55 @@ def extract_text(data: bytes) -> str:
         return "\n\n".join(parts)
     finally:
         doc.close()
+
+
+def extract_guv_section(data: bytes) -> str:
+    """Extract just the 'Kontennachweis zur GuV' pages (and any continuation).
+
+    Bei grossen Jahresabschluss-PDFs (60+ Seiten) ist der Kontennachweis zur
+    GuV nur ein kleiner Teil. Wenn wir den kompletten Text an Claude geben,
+    verliert es den Fokus und extrahiert Kontennamen ohne Werte. Lieber
+    gezielt den relevanten Abschnitt schicken.
+
+    Heuristik (robust gegenueber verschiedenen Steuerberater-Formaten):
+    - Seiten mit "Kontennachweis" + einer GuV-Referenz (Gewinn/G.u.V/GuV)
+      im ersten Drittel des Texts
+    - NICHT Bilanz-Kontennachweis (Aktiva/Passiva im Kopf)
+
+    Fallback: wenn nichts passt, den vollen Text zurueckgeben (kleine PDFs).
+    """
+    import re
+    guv_header = re.compile(r"Kontennachweis\s+zur?\s+(Gewinn|G\.?u\.?V)",
+                            re.IGNORECASE)
+
+    doc = _open_pdf(data)
+    try:
+        matched_pages: list[int] = []
+        for i, page in enumerate(doc):
+            text = page.get_text("text")
+            head = text[:400]  # Header-Bereich
+            if not guv_header.search(head):
+                continue
+            # Bilanz-Kontennachweis ausschliessen
+            if re.search(r"\bAKTIVA\b|\bPASSIVA\b", head, re.IGNORECASE):
+                continue
+            matched_pages.append(i)
+
+        if not matched_pages:
+            # Keine spezifische GuV-Seite erkannt → vollen Text zurueckgeben
+            parts = []
+            for i, page in enumerate(doc, start=1):
+                parts.append(f"=== Seite {i} ===\n{page.get_text('text')}")
+            return "\n\n".join(parts)
+
+        # Alle Treffer + eine Puffer-Seite hinten (falls Fortsetzung ohne Header)
+        last = matched_pages[-1]
+        if last + 1 < doc.page_count:
+            matched_pages.append(last + 1)
+
+        parts = []
+        for i in matched_pages:
+            parts.append(f"=== Seite {i+1} ===\n{doc[i].get_text('text')}")
+        return "\n\n".join(parts)
+    finally:
+        doc.close()
