@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+app/__init__.py
+app/excel/__init__.py
+app/routes/__init__.py
+app/worker/__init__.py
+prozess_uebertrag.egg-info/PKG-INFO
+prozess_uebertrag.egg-info/SOURCES.txt
+prozess_uebertrag.egg-info/dependency_links.txt
+prozess_uebertrag.egg-info/requires.txt
+prozess_uebertrag.egg-info/top_level.txt
