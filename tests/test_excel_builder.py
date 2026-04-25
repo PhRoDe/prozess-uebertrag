@@ -70,12 +70,15 @@ def test_ja_sums_are_formulas():
     assert isinstance(val, str) and val.startswith("=SUM")
 
 
-def test_bwa_sum_is_direct_value_not_formula():
+def test_bwa_sum_direct_value_when_no_accounts():
+    """BWA-Spalten bekommen nur direct value wenn die Gruppe keine Konten hat.
+    Mit Konten: auch BWA wird per SUM-Formel summiert."""
     xlsx = build_excel(_sample(with_bwa=True))
     ws = _ws(xlsx)
     umsatz_row = _find_row(ws, "Umsatzerlöse")
     bwa_val = ws.cell(umsatz_row, 5).value  # BWA 2025 = Spalte 5
-    assert bwa_val == 500000  # Direkter Wert
+    # Hier hat Umsatzerlöse 1 Konto (8400) → SUM-Formel
+    assert isinstance(bwa_val, str) and bwa_val.startswith("=SUM")
 
 
 def test_jahresergebnis_expenses_negative_is_simple_sum():

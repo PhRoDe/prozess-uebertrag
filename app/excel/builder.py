@@ -42,13 +42,11 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     groups = _apply_review_answers(groups, consolidated.get("questions", []),
                                     review_answers)
 
-    # "Verminderung" wirkt semantisch mindernd im Jahresergebnis (Bestandsabbau = Kosten).
-    # PDFs zeigen den Wert aber oft positiv → muss als aufwand gezählt werden.
+    # "Verminderung" wirkt semantisch mindernd im Jahresergebnis. Die Behandlung
+    # passiert direkt in der JÜ-Formel (immer subtrahieren), nicht über type.
     groups = _reclassify_bestandsveraenderung(groups)
 
     # Sign-convention aus ECHTEN Aufwands-Werten ableiten, statt Claude zu vertrauen.
-    # Claude klassifiziert die Convention inkonsistent zwischen PDFs des gleichen
-    # Steuerberaters. Datenbasis ist robuster.
     columns = _infer_sign_conventions(columns, groups)
 
     # Header row
@@ -99,22 +97,21 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
         for col_idx, col in enumerate(columns):
             target_col = 3 + col_idx
             col_letter = get_column_letter(target_col)
-            if col["kind"] == "bwa":
-                # BWA: direkter Wert aus column_sums
+            has_details = detail_end >= detail_start
+            if has_details:
+                # Gruppe hat Konten — SUM-Formel (gilt für JA *und* BWA,
+                # seit BWA auch Einzelkonten liefert)
+                formula = f"=SUM({col_letter}{detail_start}:{col_letter}{detail_end})"
+                c = ws.cell(row=sum_row, column=target_col, value=formula)
+            elif col["kind"] == "bwa":
+                # BWA ohne Konten für diese Gruppe → direkter Wert aus column_sums
                 bwa_val = g.get("column_sums", {}).get(col_idx)
                 c = ws.cell(row=sum_row, column=target_col, value=bwa_val)
             elif has_children:
-                # Parent-Gruppe ohne eigene Accounts → Summe über Sub-Summen.
-                # Sub-Summen werden später vollständig eingetragen; wir speichern
-                # den nötigen Formula-Aufbau für einen späteren Pass.
+                # Parent-Gruppe → SUM über Sub-Summen (Pass 2)
                 c = ws.cell(row=sum_row, column=target_col, value=None)
             else:
-                # JA: SUM über den Detail-Bereich
-                if detail_end >= detail_start:
-                    formula = f"=SUM({col_letter}{detail_start}:{col_letter}{detail_end})"
-                    c = ws.cell(row=sum_row, column=target_col, value=formula)
-                else:
-                    c = ws.cell(row=sum_row, column=target_col, value=0)
+                c = ws.cell(row=sum_row, column=target_col, value=0)
             c.number_format = EUR_FORMAT
             c.font = BOLD if not is_sub else BOLD_LIGHT
 
@@ -164,6 +161,16 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
                 continue
+            # Spezialfall: Verminderung des Bestandes wirkt IMMER mindernd auf
+            # den JÜ. Der Wert kann positiv (Bestand sank) oder negativ (Bestand
+            # stieg) sein — in beiden Fällen ist JÜ-Beitrag = -Wert. Subtraktion
+            # macht das semantisch korrekt unabhängig vom Vorzeichen.
+            name_lc = (g.get("name") or "").lower()
+            is_verminderung = "verminderung" in name_lc and "bestand" in name_lc
+            if is_verminderung:
+                parts_minus.append(sum_r)
+                continue
+
             if conv == "expenses_negative":
                 # Alles addieren — Aufwände sind eh negativ
                 parts_plus.append(sum_r)
@@ -235,6 +242,45 @@ def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
     return out
 
 
+def _normalize_verminderung_signs(groups: list[dict],
+                                    columns: list[dict]) -> list[dict]:
+    """Verminderung-Bestand-Werte ans Vorzeichen-Schema der Spalte anpassen.
+
+    Claude extrahiert Aufwände manchmal positiv (typisch GuV-Layout) und
+    manchmal negativ (Layout mit Minus-Endung). Innerhalb einer Spalte sollte
+    die Konvention konsistent sein, damit die JÜ-Formel funktioniert. Bei
+    Verminderung-Bestand stimmt das Vorzeichen oft nicht mit den anderen
+    Aufwänden derselben Spalte überein → wir flippen es an.
+    """
+    out = []
+    for g in groups:
+        nl = (g.get("name") or "").lower()
+        if not ("verminderung" in nl and "bestand" in nl):
+            out.append(g)
+            continue
+        new_accounts = []
+        for acc in g.get("accounts", []):
+            new_values = {}
+            for col_idx, v in (acc.get("values") or {}).items():
+                if not isinstance(v, (int, float)) or v == 0:
+                    new_values[col_idx] = v
+                    continue
+                if col_idx >= len(columns):
+                    new_values[col_idx] = v
+                    continue
+                conv = columns[col_idx].get("sign_convention", "expenses_negative")
+                # expenses_negative: Aufwände sollten negativ sein → positiv flippen
+                # expenses_positive: Aufwände sollten positiv sein → negativ flippen
+                if (conv == "expenses_negative" and v > 0) or \
+                   (conv == "expenses_positive" and v < 0):
+                    new_values[col_idx] = -v
+                else:
+                    new_values[col_idx] = v
+            new_accounts.append({**acc, "values": new_values})
+        out.append({**g, "accounts": new_accounts})
+    return out
+
+
 def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dict]:
     """Leite sign_convention pro Spalte aus den echten Aufwand/Steuer-Werten ab.
     Mehrheit negativ → expenses_negative (einfache Summen-Formel fürs Jahresergebnis).
@@ -258,10 +304,12 @@ def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dic
                     continue
                 samples.append(v)
         if samples:
-            neg = sum(1 for v in samples if v < 0)
-            pos = len(samples) - neg
+            # Summe statt Anzahl: einzelne Skonto-Korrekturen (viele kleine
+            # negative Werte) duerfen die grossen Hauptaufwand-Werte nicht
+            # ueberstimmen.
+            total = sum(samples)
             new_col["sign_convention"] = (
-                "expenses_negative" if neg >= pos else "expenses_positive"
+                "expenses_negative" if total < 0 else "expenses_positive"
             )
         out.append(new_col)
     return out
