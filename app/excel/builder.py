@@ -233,11 +233,22 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
         target_col = 3 + col_idx
         col_letter = get_column_letter(target_col)
         conv = col.get("sign_convention", "expenses_negative")
+        # Wenn die Spalte echte Konten-Daten in Top-Level-Gruppen hat, sind
+        # reine Aggregat-Gruppen (accounts=0, nur column_sum) redundante Sichten
+        # derselben Werte (typisch BWA-Aggregate die JA-Konten zusammenfassen)
+        # → in der JÜ-Formel ueberspringen, sonst Doppelzaehlung.
+        col_has_account_data = any(
+            (acc.get("values") or {}).get(col_idx) is not None
+            for g in groups if g.get("sub_group_of") is None
+            for acc in (g.get("accounts") or [])
+        )
         parts_plus: list[int] = []
         parts_minus: list[int] = []
         for g in groups:
             if g.get("sub_group_of") is not None:
                 continue  # nur Top-Level summieren
+            if col_has_account_data and not g.get("accounts"):
+                continue  # redundante Aggregat-Gruppe — Daten stecken schon in JA-Konten
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
                 continue
@@ -531,11 +542,18 @@ def _compute_excel_jue_per_column(groups: list[dict],
     out: dict[int, float] = {}
     for col_idx, col in enumerate(columns):
         conv = col.get("sign_convention", "expenses_negative")
+        col_has_account_data = any(
+            (acc.get("values") or {}).get(col_idx) is not None
+            for g in groups if g.get("sub_group_of") is None
+            for acc in (g.get("accounts") or [])
+        )
         total = 0.0
         for g in groups:
             if g.get("sub_group_of") is not None:
                 continue
             if g.get("gkv_section") in BILANZGEWINN_SECTIONS:
+                continue
+            if col_has_account_data and not g.get("accounts"):
                 continue
             # Gruppen-Summe = eigene Konten + Konten aller Sub-Gruppen.
             # Top-Level kann beides haben (zB sonst. betr. Aufw. mit

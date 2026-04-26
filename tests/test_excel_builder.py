@@ -374,3 +374,82 @@ def test_jue_formel_addiert_bestandsveraenderung():
     assert f"+C{bestand_row}" in formula or formula.startswith(f"=C{bestand_row}") \
         or f"=C{bestand_row}+" in formula
     assert f"-C{bestand_row}" not in formula
+
+
+def test_jue_ignoriert_redundante_aggregat_gruppen():
+    """BWA-Aggregat-Gruppen ohne eigene Konten (z.B. 'Personalkosten' = Sum
+    von 'Löhne' + 'Soz. Abg.') duerfen die JÜ-Formel nicht doppelt belasten,
+    wenn die JA-Gruppen die Konten bereits enthalten."""
+    cons = {
+        "columns": [
+            {"label": "BWA 2025", "kind": "bwa", "year": 2025,
+             "sign_convention": "expenses_positive"},
+        ],
+        "groups": [
+            # JA-Gruppe mit Konten: Löhne 1000, Soz. Abg. 200
+            {"name": "Löhne und Gehälter", "type": "aufwand",
+             "gkv_section": "personalaufwand_loehne",
+             "sub_group_of": None, "column_sums": {},
+             "accounts": [{"konto_nr": "6020", "bezeichnung": "Gehälter",
+                            "values": {0: 1000}, "confidence": "high"}]},
+            {"name": "Soz. Abgaben", "type": "aufwand",
+             "gkv_section": "personalaufwand_sozial",
+             "sub_group_of": None, "column_sums": {},
+             "accounts": [{"konto_nr": "6110", "bezeichnung": "Sozialabgaben",
+                            "values": {0: 200}, "confidence": "high"}]},
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese",
+             "sub_group_of": None, "column_sums": {},
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Umsatz",
+                            "values": {0: 5000}, "confidence": "high"}]},
+            # BWA-Aggregat ohne eigene Konten — Sum schon in JA-Gruppen
+            {"name": "Personalkosten", "type": "aufwand",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 1200},  # = 1000 + 200
+             "accounts": []},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(cons)
+    ws = _ws(xlsx)
+    je_row = _find_row(ws, "Jahresergebnis")
+    personalkosten_row = _find_row(ws, "Personalkosten")
+    formula = ws.cell(je_row, 3).value
+    # Personalkosten-Zeile darf NICHT in der JE-Formel auftauchen
+    assert f"C{personalkosten_row}" not in formula, \
+        f"Aggregat-Gruppe 'Personalkosten' wurde doppelt gezaehlt: {formula}"
+    # JÜ = Umsatz - Löhne - Soz.Abg. = 5000 - 1000 - 200 = 3800 (NICHT 2600 mit Doppelzählung)
+    loehne_row = _find_row(ws, "Löhne und Gehälter")
+    soz_row = _find_row(ws, "Soz. Abgaben")
+    umsatz_row = _find_row(ws, "Umsatzerlöse")
+    assert f"C{loehne_row}" in formula
+    assert f"C{soz_row}" in formula
+    assert f"C{umsatz_row}" in formula
+
+
+def test_jue_nutzt_aggregate_wenn_keine_konten_in_spalte():
+    """Wenn eine Spalte (typisch reine BWA ohne JA) keine Konten-Daten hat,
+    werden die Aggregat-Gruppen normal in JÜ einbezogen."""
+    cons = {
+        "columns": [
+            {"label": "BWA 2025", "kind": "bwa", "year": 2025,
+             "sign_convention": "expenses_positive"},
+        ],
+        "groups": [
+            # Keine JA-Gruppen, nur BWA-Aggregate
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "column_sums": {0: 5000}, "accounts": []},
+            {"name": "Personalkosten", "type": "aufwand",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 1200}, "accounts": []},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(cons)
+    ws = _ws(xlsx)
+    je_row = _find_row(ws, "Jahresergebnis")
+    personalkosten_row = _find_row(ws, "Personalkosten")
+    formula = ws.cell(je_row, 3).value
+    # Hier MUSS Personalkosten in der Formel sein (nichts anderes da)
+    assert f"C{personalkosten_row}" in formula
