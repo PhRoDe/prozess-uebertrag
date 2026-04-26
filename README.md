@@ -14,7 +14,12 @@ Siehe `CLAUDE.md` für die Entwickler-Perspektive,
 - Upload von Jahresabschluss-PDFs (Text oder Scan) und BWAs
 - Automatische Typerkennung (JA vs. BWA) via Claude
 - Extraktion pro PDF, Multi-Jahres-Konsolidierung mit Cross-Check
-- **Excel übernimmt die PDF-Gliederung 1:1** — keine HGB-Normalisierung
+- **Excel übernimmt die PDF-Gliederung** + GKV-Sektion-Klassifikation (§275 HGB)
+  als STB-unabhängiger Anker für Multi-Jahr-Matching
+- **Plausibilitäts-Anker:** Excel zeigt PDF-JÜ + Differenz-Zeile am Ende; Diff
+  > 1 ct erscheint automatisch im Fragen-Sheet
+- **Bilanzgewinn-Block** (Gewinnvortrag, Ausschüttung, Bilanzgewinn) als eigene
+  Sektion nach dem Jahresergebnis mit Bilanzgewinn-Formel
 - Vorjahres-Mismatch- und Summen-Mismatch-Checks im separaten "Fragen"-Sheet
 - Ad-hoc-Nutzung, alle Dateien werden nach 24h automatisch gelöscht
 - Team-Passwort-Login, Session-Cookie, Brute-Force- und Upload-Rate-Limit
@@ -55,7 +60,8 @@ cp .env.example .env
 
 ```bash
 .venv/bin/pytest                              # Unit-Tests, ~3s
-.venv/bin/python tests/fixtures/smoketest_claude.py  # Live Claude API (kostet ~0,10 €)
+.venv/bin/python tests/fixtures/smoketest_claude.py  # Live Claude API mit synthetischer Mini-PDF (~0,10 €)
+.venv/bin/python tests/fixtures/smoketest_e2e.py "<pfad/ja.pdf>" ...  # E2E gegen echte JA-PDFs, schreibt smoketest_output.xlsx
 ```
 
 ## Docker lokal
@@ -149,9 +155,12 @@ railway up
 - Extraktions-Logik lebt in `app/worker/`, KEINE HTTP-Imports dort.
 - Excel-Logik lebt in `app/excel/`, KEINE Netzwerk-Calls dort.
 - **Alle Excel-Zwischensummen MÜSSEN Formeln sein** (`=SUM(...)`), nie hardcoded.
-- **Keine HGB-Normalisierung**: Wenn eine PDF "Raumkosten" als Hauptgruppe
-  zeigt, bleibt das so.
-- Claude übernimmt Vorzeichen **1:1 aus der PDF**. Die Jahresergebnis-Formel
-  respektiert die erkannte `sign_convention`.
+- **Keine HGB-Normalisierung der Reihenfolge**: Wenn eine PDF "Raumkosten" als
+  Hauptgruppe zeigt, bleibt das so. Aber `gkv_section`-Slug pro Gruppe ist
+  Pflicht (semantischer Anker für JÜ-Formel + Cross-Year-Matching).
+- Claude übernimmt Vorzeichen **1:1 aus der PDF**. Die `sign_convention` wird
+  im Builder aus den Daten abgeleitet, nicht blind aus Claude übernommen.
+- `pdf_jahresueberschuss_gj/_vj` ist Pflicht — Builder zeigt PDF-JÜ vs
+  Excel-JÜ-Diff am Ende, Diff > 1 ct landet im Fragen-Sheet.
 - Änderungen an Prompts (`app/worker/prompts.py`) immer mit
-  `tests/fixtures/smoketest_claude.py` gegen echte Claude API verifizieren.
+  `tests/fixtures/smoketest_e2e.py` gegen echte JA-PDFs verifizieren.

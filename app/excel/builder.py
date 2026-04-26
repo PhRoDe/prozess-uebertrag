@@ -18,10 +18,61 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-EUR_FORMAT = '#,##0.00;[Red]-#,##0.00'
+EUR_FORMAT = '#,##0.00;-#,##0.00'
 YELLOW = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
 BOLD = Font(bold=True)
 BOLD_LIGHT = Font(bold=True, color="555555")
+
+# Bilanzgewinn-Sektionen: NICHT Teil der GuV / des JÜ. Werden in einem
+# eigenen Block am Ende der Excel gerendert.
+BILANZGEWINN_SECTIONS = {"gewinnvortrag", "ausschuettung", "bilanzgewinn"}
+
+# Mapping von gkv_section auf JÜ-Rolle. Authoritativ ueber `type`, weil
+# Claude beim type-Feld haeufiger driftet als bei der GKV-Klassifikation.
+SECTION_ROLE: dict[str, str] = {
+    "umsatzerloese": "ertrag",
+    "bestandsveraenderung": "ertrag",  # Verminderung wird per Name-Sonderfall subtrahiert
+    "aktivierte_eigenleistungen": "ertrag",
+    "sonst_betr_ertraege": "ertrag",
+    "materialaufwand_rhb": "aufwand",
+    "materialaufwand_bez_leistungen": "aufwand",
+    "personalaufwand_loehne": "aufwand",
+    "personalaufwand_sozial": "aufwand",
+    "abschreibungen": "aufwand",
+    "sonst_betr_aufw": "aufwand",
+    "ertraege_wertpapiere": "ertrag",
+    "ertraege_beteiligungen": "ertrag",
+    "sonstige_zins_ertraege": "ertrag",
+    "zinsaufwand": "aufwand",
+    "ee_steuern": "steuer",
+    "sonst_steuern": "steuer",
+}
+
+
+def _coerce_int_keys(groups: list[dict]) -> list[dict]:
+    """JSON roundtrip via Postgres turns int dict keys into strings. Restore
+    int keys for `values` and `column_sums` so the builder can index by col_idx."""
+    out = []
+    for g in groups:
+        g2 = dict(g)
+        g2["column_sums"] = {int(k): v for k, v in (g.get("column_sums") or {}).items()}
+        new_accounts = []
+        for acc in g.get("accounts", []) or []:
+            a2 = dict(acc)
+            a2["values"] = {int(k): v for k, v in (acc.get("values") or {}).items()}
+            new_accounts.append(a2)
+        g2["accounts"] = new_accounts
+        out.append(g2)
+    return out
+
+
+def _resolve_role(g: dict) -> str:
+    """Bestimmt fuer eine Gruppe die JUE-Rolle (ertrag/aufwand/steuer/neutral).
+    gkv_section ist authoritativ, falls bekannt; sonst fallback auf type."""
+    section = g.get("gkv_section")
+    if section in SECTION_ROLE:
+        return SECTION_ROLE[section]
+    return g.get("type", "neutral")
 
 
 def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes:
@@ -36,15 +87,40 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     ws.title = "Übertrag"
 
     columns = consolidated.get("columns", [])
-    groups = consolidated.get("groups", [])
+    groups = _coerce_int_keys(consolidated.get("groups", []))
+    pdf_jue_per_column = {int(k): v for k, v in
+                           (consolidated.get("pdf_jue_per_column") or {}).items()}
+    questions = list(consolidated.get("questions") or [])
+
+    # Sanity: if any accounts exist at all, at least one must carry a value.
+    # An all-empty account set means a structural bug (typically a JSON-roundtrip
+    # key-type drift) — fail loud rather than ship a blank workbook.
+    accounts_total = sum(len(g.get("accounts", []) or []) for g in groups)
+    accounts_with_values = sum(
+        1 for g in groups for acc in (g.get("accounts") or [])
+        if any(v is not None for v in (acc.get("values") or {}).values())
+    )
+    if accounts_total > 0 and accounts_with_values == 0:
+        raise ValueError(
+            f"build_excel: {accounts_total} accounts present but all value "
+            "dicts are empty — likely a key-type mismatch between consolidate "
+            "(int keys) and the JSON-roundtripped payload (string keys)."
+        )
 
     # _apply_review routed open-question accounts into named groups
-    groups = _apply_review_answers(groups, consolidated.get("questions", []),
-                                    review_answers)
+    groups = _apply_review_answers(groups, questions, review_answers)
 
     # "Verminderung" wirkt semantisch mindernd im Jahresergebnis. Die Behandlung
     # passiert direkt in der JÜ-Formel (immer subtrahieren), nicht über type.
     groups = _reclassify_bestandsveraenderung(groups)
+
+    # Bilanzgewinn-Gruppen aus dem GuV-Body raustrennen, separat im
+    # Bilanzgewinn-Block rendern.
+    guv_groups = [g for g in groups
+                   if g.get("gkv_section") not in BILANZGEWINN_SECTIONS]
+    bilanzgewinn_groups = [g for g in groups
+                            if g.get("gkv_section") in BILANZGEWINN_SECTIONS]
+    groups = guv_groups
 
     # Sign-convention aus ECHTEN Aufwands-Werten ableiten, statt Claude zu vertrauen.
     columns = _infer_sign_conventions(columns, groups)
@@ -117,7 +193,11 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
         row_cursor += 1
 
-    # Pass 2: Parent-Gruppen-Summen, die über Sub-Summen gehen
+    # Pass 2: Parent-Gruppen-Summen über Sub-Summen. Wenn der Parent bereits
+    # eine SUM(...)-Formel über seine eigenen Konten hat, ergänzen wir die
+    # Sub-Refs daran -- so funktioniert auch der Fall "Top-Level mit Konten
+    # UND Sub-Gruppen" (zB Sonst. betr. Aufw. mit direktem Forderungsverlust-
+    # Konto und mehreren Sub-Kategorien).
     for parent_name, children_names in children_by_parent.items():
         parent_row = group_sum_rows.get(parent_name)
         if parent_row is None:
@@ -125,16 +205,19 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
         for col_idx, col in enumerate(columns):
             target_col = 3 + col_idx
             col_letter = get_column_letter(target_col)
-            # Wenn Zelle schon einen Wert hat (BWA-Fall), nicht überschreiben
             current = ws.cell(row=parent_row, column=target_col).value
-            if current is not None:
-                continue
             child_refs = [f"{col_letter}{group_sum_rows[cn]}"
                           for cn in children_names if cn in group_sum_rows]
             if not child_refs:
-                formula = "=0"
-            else:
+                continue
+            if isinstance(current, str) and current.startswith("=SUM("):
+                # Parent hat eigene Konten-Summe -> Sub-Refs anhaengen
+                formula = current + "+" + "+".join(child_refs)
+            elif current is None:
                 formula = "=" + "+".join(child_refs)
+            else:
+                # BWA-Direct-Wert oder 0 -> nicht ueberschreiben
+                continue
             c = ws.cell(row=parent_row, column=target_col, value=formula)
             c.number_format = EUR_FORMAT
             c.font = BOLD
@@ -155,9 +238,6 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
         for g in groups:
             if g.get("sub_group_of") is not None:
                 continue  # nur Top-Level summieren
-            gtype = g.get("type", "neutral")
-            if gtype == "bilanz":
-                continue  # Gewinnvortrag/Bilanzgewinn sind NICHT Teil des JÜ
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
                 continue
@@ -171,14 +251,14 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
                 parts_minus.append(sum_r)
                 continue
 
+            role = _resolve_role(g)
             if conv == "expenses_negative":
                 # Alles addieren — Aufwände sind eh negativ
                 parts_plus.append(sum_r)
             else:
-                # Erträge plus, Aufwände/Steuern minus
-                if gtype == "ertrag":
+                if role == "ertrag":
                     parts_plus.append(sum_r)
-                elif gtype in ("aufwand", "steuer"):
+                elif role in ("aufwand", "steuer"):
                     parts_minus.append(sum_r)
                 else:
                     parts_plus.append(sum_r)
@@ -194,6 +274,106 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
         c.number_format = EUR_FORMAT
         c.font = BOLD
 
+    # Bilanzgewinn-Block (Gewinnvortrag, Ausschuettung, Bilanzgewinn-Formel)
+    bg_sum_rows: dict[str, int] = {}  # gkv_section -> row
+    if bilanzgewinn_groups:
+        row_cursor += 1
+        ws.cell(row=row_cursor, column=2,
+                value="--- Bilanzgewinn-Rechnung ---").font = BOLD_LIGHT
+        for g in bilanzgewinn_groups:
+            row_cursor += 1
+            sum_row = row_cursor
+            bg_sum_rows[g.get("gkv_section", "")] = sum_row
+            ws.cell(row=sum_row, column=2, value=g["name"]).font = BOLD_LIGHT
+            detail_start = row_cursor + 1
+            detail_end = detail_start - 1
+            for acc in g.get("accounts", []):
+                row_cursor += 1
+                ws.cell(row=row_cursor, column=1, value=acc.get("konto_nr") or "")
+                ws.cell(row=row_cursor, column=2,
+                        value=f"  {acc.get('bezeichnung', '')}")
+                for col_idx in range(len(columns)):
+                    v = acc.get("values", {}).get(col_idx)
+                    c = ws.cell(row=row_cursor, column=3 + col_idx, value=v)
+                    c.number_format = EUR_FORMAT
+                detail_end = row_cursor
+            for col_idx in range(len(columns)):
+                target_col = 3 + col_idx
+                col_letter = get_column_letter(target_col)
+                if detail_end >= detail_start:
+                    formula = (f"=SUM({col_letter}{detail_start}:"
+                                f"{col_letter}{detail_end})")
+                    c = ws.cell(row=sum_row, column=target_col, value=formula)
+                else:
+                    c = ws.cell(row=sum_row, column=target_col, value=0)
+                c.number_format = EUR_FORMAT
+                c.font = BOLD_LIGHT
+
+        # Bilanzgewinn-Formel: JÜ + Gewinnvortrag - Ausschuettung
+        # (- Verlustvortrag wenn vorhanden, + bilanzgewinn-Sektion bedeutet
+        # die PDF gibt einen vorberechneten Wert vor — den ueberschreiben wir
+        # nicht, sondern stellen daneben unsere Formel)
+        row_cursor += 1
+        bg_row = row_cursor
+        ws.cell(row=bg_row, column=2,
+                value="Bilanzgewinn (Formel)").font = BOLD
+        gv_row = bg_sum_rows.get("gewinnvortrag")
+        au_row = bg_sum_rows.get("ausschuettung")
+        for col_idx in range(len(columns)):
+            target_col = 3 + col_idx
+            col_letter = get_column_letter(target_col)
+            parts = [f"{col_letter}{je_row}"]
+            if gv_row:
+                parts.append(f"+{col_letter}{gv_row}")
+            if au_row:
+                parts.append(f"-{col_letter}{au_row}")
+            formula = "=" + "".join(parts)
+            c = ws.cell(row=bg_row, column=target_col, value=formula)
+            c.number_format = EUR_FORMAT
+            c.font = BOLD
+
+    # Plausibilitaets-Anker: PDF-JUE + Differenz-Zeile
+    if pdf_jue_per_column:
+        row_cursor += 1
+        pdf_jue_row = row_cursor
+        ws.cell(row=pdf_jue_row, column=2,
+                value="PDF-Jahresüberschuss").font = BOLD_LIGHT
+        for col_idx in range(len(columns)):
+            v = pdf_jue_per_column.get(col_idx)
+            c = ws.cell(row=pdf_jue_row, column=3 + col_idx, value=v)
+            c.number_format = EUR_FORMAT
+            c.font = BOLD_LIGHT
+        row_cursor += 1
+        diff_row = row_cursor
+        ws.cell(row=diff_row, column=2,
+                value="Differenz Excel ↔ PDF").font = BOLD_LIGHT
+        for col_idx in range(len(columns)):
+            target_col = 3 + col_idx
+            col_letter = get_column_letter(target_col)
+            if pdf_jue_per_column.get(col_idx) is None:
+                continue
+            formula = f"={col_letter}{je_row}-{col_letter}{pdf_jue_row}"
+            c = ws.cell(row=diff_row, column=target_col, value=formula)
+            c.number_format = EUR_FORMAT
+            c.font = BOLD_LIGHT
+
+        # Build-Zeit-Cross-Check: Excel-JUE numerisch berechnen und gegen PDF-JUE
+        # vergleichen. Diff > 1 ct -> Fragen-Sheet
+        excel_jue = _compute_excel_jue_per_column(groups, columns)
+        for col_idx, col in enumerate(columns):
+            pdf_v = pdf_jue_per_column.get(col_idx)
+            excel_v = excel_jue.get(col_idx)
+            if pdf_v is None or excel_v is None:
+                continue
+            if abs(excel_v - pdf_v) > 0.01:
+                questions.append({
+                    "type": "jue_excel_vs_pdf_mismatch",
+                    "year": col.get("year"),
+                    "column_label": col.get("label"),
+                    "pdf_says": pdf_v,
+                    "excel_says": round(excel_v, 2),
+                })
+
     # Spaltenbreiten
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 55
@@ -203,7 +383,7 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     # Fragen-Sheet
     fragen = wb.create_sheet("Fragen")
     fragen.append(["Thema", "Details"])
-    for q in consolidated.get("questions", []):
+    for q in questions:
         details = _format_question(q)
         fragen.append([q.get("type", ""), details])
 
@@ -213,8 +393,8 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
 
 def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
-    """Korrigiert semantische Missklassifikationen aus der Claude-Extraktion
-    und filtert Nicht-GuV-Positionen aus.
+    """Robustifiziert die GKV-Klassifikation per Name-Match (Defense-in-Depth
+    falls Claude `gkv_section` nicht oder falsch setzt).
 
     GKV §275 Pos 2: 'Erhöhung ODER Verminderung des Bestandes an fertigen und
     unfertigen Erzeugnissen'. PDFs labeln das oft als 'Verminderung' mit positivem
@@ -222,21 +402,24 @@ def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
 
     'Gewinnvortrag', 'Verlustvortrag', 'Bilanzgewinn', 'Bilanzverlust',
     'Ausschüttung' sind Eigenkapital-Bewegungen (Bilanzgewinn-Rechnung), NICHT
-    Teil der GuV. Der Uebertrag zeigt nur die GuV → diese Gruppen komplett
-    ausfiltern.
+    Teil der GuV. Werden hier zur passenden gkv_section-Sektion umgemappt,
+    damit der Builder sie in den Bilanzgewinn-Block schiebt.
     """
     out = []
     for g in groups:
         name_lc = (g.get("name") or "").lower()
-        # Bilanz-Positionen komplett ausfiltern (nicht Teil der GuV)
-        if any(k in name_lc for k in ["gewinnvortrag", "verlustvortrag",
-                                       "bilanzgewinn", "bilanzverlust",
-                                       "ausschüttung"]):
-            continue
-        if "verminderung" in name_lc and "bestand" in name_lc:
-            out.append({**g, "type": "aufwand"})
+        if "gewinnvortrag" in name_lc or "verlustvortrag" in name_lc:
+            out.append({**g, "gkv_section": "gewinnvortrag"})
+        elif "ausschüttung" in name_lc or "ausschuettung" in name_lc:
+            out.append({**g, "gkv_section": "ausschuettung"})
+        elif ("bilanzgewinn" in name_lc or "bilanzverlust" in name_lc):
+            out.append({**g, "gkv_section": "bilanzgewinn"})
+        elif "verminderung" in name_lc and "bestand" in name_lc:
+            out.append({**g, "type": "aufwand",
+                        "gkv_section": g.get("gkv_section") or "bestandsveraenderung"})
         elif "erhöhung" in name_lc and "bestand" in name_lc:
-            out.append({**g, "type": "ertrag"})
+            out.append({**g, "type": "ertrag",
+                        "gkv_section": g.get("gkv_section") or "bestandsveraenderung"})
         else:
             out.append(g)
     return out
@@ -350,6 +533,53 @@ def _apply_review_answers(groups: list[dict], questions: list[dict],
     return groups
 
 
+def _compute_excel_jue_per_column(groups: list[dict],
+                                    columns: list[dict]) -> dict[int, float]:
+    """Berechnet die numerische JUE pro Spalte parallel zur Excel-Formel,
+    damit ein Build-Zeit-Cross-Check gegen pdf_jue moeglich ist.
+    Spiegelt die Logik der JE-Formel im Hauptbuilder."""
+    out: dict[int, float] = {}
+    for col_idx, col in enumerate(columns):
+        conv = col.get("sign_convention", "expenses_negative")
+        total = 0.0
+        for g in groups:
+            if g.get("sub_group_of") is not None:
+                continue
+            if g.get("gkv_section") in BILANZGEWINN_SECTIONS:
+                continue
+            # Gruppen-Summe = eigene Konten + Konten aller Sub-Gruppen.
+            # Top-Level kann beides haben (zB sonst. betr. Aufw. mit
+            # direktem Forderungsverlust-Konto und Sub 'Raumkosten').
+            grp_sum = 0.0
+            for acc in g.get("accounts", []):
+                v = acc.get("values", {}).get(col_idx)
+                if isinstance(v, (int, float)):
+                    grp_sum += v
+            for sub in groups:
+                if sub.get("sub_group_of") == g["name"]:
+                    for acc in sub.get("accounts", []):
+                        v = acc.get("values", {}).get(col_idx)
+                        if isinstance(v, (int, float)):
+                            grp_sum += v
+            name_lc = (g.get("name") or "").lower()
+            is_verminderung = "verminderung" in name_lc and "bestand" in name_lc
+            if is_verminderung:
+                total -= grp_sum
+                continue
+            role = _resolve_role(g)
+            if conv == "expenses_negative":
+                total += grp_sum
+            else:
+                if role == "ertrag":
+                    total += grp_sum
+                elif role in ("aufwand", "steuer"):
+                    total -= grp_sum
+                else:
+                    total += grp_sum
+        out[col_idx] = total
+    return out
+
+
 def _format_question(q: dict) -> str:
     t = q.get("type", "")
     if t == "previous_year_mismatch":
@@ -364,4 +594,11 @@ def _format_question(q: dict) -> str:
         return (f"Konto {q.get('konto_nr') or '(ohne Nr)'} · "
                 f"'{q.get('bezeichnung')}' · Jahr {q.get('year')} · "
                 f"Betrag {q.get('betrag_gj')} — {q.get('hint', '')}")
+    if t == "jue_excel_vs_pdf_mismatch":
+        return (f"Spalte {q.get('column_label')}: "
+                f"PDF-JÜ {q.get('pdf_says')} ≠ Excel-JÜ {q.get('excel_says')}")
+    if t == "pdf_jue_previous_year_mismatch":
+        return (f"Vorjahres-JÜ {q.get('year')}: "
+                f"eigene PDF sagt {q.get('own_value')}, "
+                f"PDF {q.get('from_doc_year')} sagt {q.get('pdf_says')}")
     return str(q)

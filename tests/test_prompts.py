@@ -40,3 +40,22 @@ def test_system_prompt_declares_delimiter_safety():
 def test_doc_type_prompt_discriminates():
     assert "jahresabschluss" in DOC_TYPE_PROMPT.lower()
     assert "bwa" in DOC_TYPE_PROMPT.lower()
+
+
+def test_extraction_prompt_requires_pdf_jahresueberschuss():
+    """Plausibilitaets-Anker: PDF-JUE Pflicht im Output, damit der Builder
+    PDF-JUE vs Excel-JUE-Formel cross-checken kann."""
+    assert "pdf_jahresueberschuss_gj" in EXTRACTION_PROMPT_TEXT
+    assert "pdf_jahresueberschuss_vj" in EXTRACTION_PROMPT_TEXT
+
+
+def test_extraction_prompt_requires_gkv_section():
+    """Jede Gruppe muss in eine GKV-Sektion (HGB §275 GKV) klassifiziert
+    werden, damit der Builder eine stabile, STB-unabhaengige Reihenfolge
+    erzwingen kann."""
+    assert "gkv_section" in EXTRACTION_PROMPT_TEXT
+    # Wichtigste Sektionen muessen im Prompt stehen
+    for slug in ("umsatzerloese", "materialaufwand_rhb",
+                 "personalaufwand_loehne", "abschreibungen",
+                 "sonst_betr_aufw", "ee_steuern", "sonst_steuern"):
+        assert slug in EXTRACTION_PROMPT_TEXT, f"Missing slug: {slug}"

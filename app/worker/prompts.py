@@ -56,6 +56,42 @@ REGELN:
    - "steuer": Steuern vom Einkommen und Ertrag, sonstige Steuern
    - "neutral": falls sich nicht klar zuordnen lässt
 
+5b. **GKV-Sektion** (Pflichtfeld `gkv_section` pro Gruppe): jede Gruppe einer
+    festen GKV-Position nach §275 HGB (Gesamtkostenverfahren) zuordnen. Das ist
+    der STB-unabhängige Anker. Erlaubte Slugs:
+    - "umsatzerloese" → Pos. 1 (1. Umsatzerlöse)
+    - "bestandsveraenderung" → Pos. 2 (Erhöhung/Verminderung Bestand fertige+
+      unfertige Erzeugnisse)
+    - "aktivierte_eigenleistungen" → Pos. 3
+    - "sonst_betr_ertraege" → Pos. 4 (Sonstige betriebliche Erträge)
+    - "materialaufwand_rhb" → Pos. 5a (Aufwendungen für Roh-, Hilfs- und
+      Betriebsstoffe und für bezogene Waren — Konten typischerweise 3xxx/5xxx
+      bis 5790)
+    - "materialaufwand_bez_leistungen" → Pos. 5b (Aufwendungen für bezogene
+      Leistungen — Konten typ. 5800-5899)
+    - "personalaufwand_loehne" → Pos. 6a (Löhne und Gehälter)
+    - "personalaufwand_sozial" → Pos. 6b (Soziale Abgaben, Aufwendungen für
+      Altersversorgung)
+    - "abschreibungen" → Pos. 7 (Abschreibungen auf immat./SAV)
+    - "sonst_betr_aufw" → Pos. 8 (Sonstige betriebliche Aufwendungen — auch
+      Raumkosten, Versicherungen, Reparaturen, Fahrzeugkosten, Werbung,
+      Verschiedenes wenn sie als eigene Hauptgruppen oder Sub von Pos. 8
+      auftauchen)
+    - "ertraege_wertpapiere" → Pos. 9 (Erträge aus Wertpapieren des
+      Finanzanlagevermögens)
+    - "ertraege_beteiligungen" → Pos. 10 (Erträge aus Beteiligungen)
+    - "sonstige_zins_ertraege" → Pos. 11 (Sonstige Zinsen und ähnliche Erträge)
+    - "zinsaufwand" → Pos. 13 (Zinsen und ähnliche Aufwendungen)
+    - "ee_steuern" → Pos. 14 (Steuern vom Einkommen und vom Ertrag —
+      Körperschaftsteuer, SolZ, Gewerbesteuer, KapESt)
+    - "sonst_steuern" → Pos. 16 (Sonstige Steuern — KFZ-Steuer, Grundsteuer)
+    - "neutral" → wenn keine eindeutige Zuordnung möglich ist
+
+    Die Sub-Gruppen-Hierarchie (`sub_group_of`) bleibt davon unberührt: wenn
+    "Raumkosten" als Sub von "Sonstige betriebliche Aufwendungen" steht,
+    setzt du `gkv_section: "sonst_betr_aufw"` UND `sub_group_of:
+    "Sonstige betriebliche Aufwendungen"`.
+
 6. **Vorzeichen-Konvention erkennen**: Wenn Aufwände im PDF durchgängig als
    negative Zahlen dargestellt werden → "expenses_negative". Wenn sie positiv
    sind → "expenses_positive".
@@ -79,6 +115,13 @@ REGELN:
     Bilanzgewinn/-verlust — gehören in die Bilanzgewinn-Rechnung, NICHT
     in die GuV. Diese Gruppen NIEMALS extrahieren.
 
+12. **PDF-Jahresüberschuss** als Plausibilitäts-Anker: Die PDF zeigt am Ende
+    der GuV den `Jahresüberschuss`/`Jahresfehlbetrag`. Diesen Endwert
+    extrahierst du in zwei Pflichtfelder `pdf_jahresueberschuss_gj` und
+    `pdf_jahresueberschuss_vj` auf Top-Level. Vorzeichen wie im PDF.
+    Damit verifiziert der Builder dass die summenbasierte Excel-Formel
+    centgenau zum PDF-Wert passt.
+
 RÜCKGABEFORMAT:
 
 {
@@ -86,10 +129,13 @@ RÜCKGABEFORMAT:
   "year": 2024,
   "previous_year": 2023,
   "sign_convention": "expenses_negative",
+  "pdf_jahresueberschuss_gj": 170834.90,
+  "pdf_jahresueberschuss_vj": 215441.07,
   "groups": [
     {
       "name": "1. Umsatzerlöse",
       "type": "ertrag",
+      "gkv_section": "umsatzerloese",
       "pdf_sum_gj": 1387335.10,
       "pdf_sum_vj": 1201968.38,
       "sub_group_of": null,
@@ -106,6 +152,7 @@ RÜCKGABEFORMAT:
     {
       "name": "5.1 Versicherungen, Beiträge und Abgaben",
       "type": "aufwand",
+      "gkv_section": "sonst_betr_aufw",
       "pdf_sum_gj": -1019.33,
       "pdf_sum_vj": -637.82,
       "sub_group_of": "5. Sonstige betriebliche Aufwendungen",

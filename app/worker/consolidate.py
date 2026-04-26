@@ -7,9 +7,20 @@ Kernprinzipien:
 - JAs und BWAs bekommen **eigene Spalten**
 - Vorzeichen-Konvention und Gruppen-Typen aus der jüngsten JA-PDF
 """
+import re
 from typing import Any
 
 MISMATCH_TOLERANCE = 0.01  # 1 cent
+
+
+def _norm_group_name(name: str) -> str:
+    """Normalize a group name for fuzzy matching: strip leading
+    numbering (1., 5.1, a)) and lowercase. Lets BWA-Group 'Umsatzerlöse'
+    merge with JA-Group '1. Umsatzerlöse'."""
+    s = (name or "").strip().lower()
+    s = re.sub(r"^[\d\.\)\s]+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -46,6 +57,7 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
                 "name": g["name"],
                 "type": g.get("type", "neutral"),
                 "sub_group_of": g.get("sub_group_of"),
+                "gkv_section": g.get("gkv_section", "neutral"),
             }
             for g in newest_ja.get("groups", [])
         ]
@@ -53,12 +65,25 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
         # vorkommt, lege die Haupt-Gruppe synthetisch direkt vor der ersten Sub an.
         group_template = _insert_missing_parents(group_template)
     else:
-        # BWAs haben keine Hierarchie, nur flache Gruppen → nehme Positionen aus erster BWA
+        # BWA-only: Struktur aus der ersten BWA übernehmen.
+        # Neue BWA-Extraktionen liefern `groups`, Legacy-Extraktionen `positions`.
         first_bwa = bwa_docs[0] if bwa_docs else None
-        group_template = [
-            {"name": p["name"], "type": p.get("type", "neutral"), "sub_group_of": None}
-            for p in (first_bwa.get("positions", []) if first_bwa else [])
-        ]
+        if first_bwa and first_bwa.get("groups"):
+            group_template = [
+                {"name": g["name"], "type": g.get("type", "neutral"),
+                 "sub_group_of": g.get("sub_group_of"),
+                 "gkv_section": g.get("gkv_section", "neutral")}
+                for g in first_bwa.get("groups", [])
+            ]
+            group_template = _insert_missing_parents(group_template)
+        elif first_bwa:
+            group_template = [
+                {"name": p["name"], "type": p.get("type", "neutral"),
+                 "sub_group_of": None, "gkv_section": "neutral"}
+                for p in first_bwa.get("positions", [])
+            ]
+        else:
+            group_template = []
 
     # 3. Daten pro Gruppe sammeln
     groups_by_name: dict[str, dict] = {
@@ -66,6 +91,7 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
             "name": g["name"],
             "type": g["type"],
             "sub_group_of": g["sub_group_of"],
+            "gkv_section": g.get("gkv_section", "neutral"),
             "column_sums": {},
             "accounts_by_key": {},  # key -> account-dict; später zu list konvertiert
             "account_order": [],  # stabile Reihenfolge der keys
@@ -92,12 +118,15 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
         doc = _find_bwa_for_col(bwa_docs, col)
         if doc is None:
             continue
-        _ingest_bwa(doc, col_idx, groups_by_name)
+        _ingest_bwa(doc, col_idx, groups_by_name, group_template)
 
     # 6. Vorjahreswerte aus JAs einsortieren (Cross-Year-Check)
     _apply_previous_year_values(ja_docs, columns, groups_by_name, questions)
 
-    # 7. Gruppen finalisieren: accounts_by_key → accounts list
+    # 7. PDF-JUE pro Spalte sammeln (Plausibilitaets-Anker)
+    pdf_jue_per_column = _collect_pdf_jue(ja_docs, columns, questions)
+
+    # 8. Gruppen finalisieren: accounts_by_key → accounts list
     groups_out = []
     for g_tpl in group_template:
         g = groups_by_name[g_tpl["name"]]
@@ -106,11 +135,13 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
             "name": g["name"],
             "type": g["type"],
             "sub_group_of": g["sub_group_of"],
+            "gkv_section": g.get("gkv_section", "neutral"),
             "column_sums": g["column_sums"],
             "accounts": accounts,
         })
 
-    return {"columns": columns, "groups": groups_out, "questions": questions}
+    return {"columns": columns, "groups": groups_out, "questions": questions,
+            "pdf_jue_per_column": pdf_jue_per_column}
 
 
 # ---------------------------------------------------------------------------
@@ -173,23 +204,91 @@ def _find_bwa_for_col(bwa_docs: list[dict], col: dict) -> dict | None:
 
 def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
                group_template: list, questions: list, newest_ja_year: int | None):
-    """Integriere ein JA-Dokument in die Konsolidierung."""
-    seen_groups_in_doc = set()
+    """Integriere ein JA-Dokument in die Konsolidierung. Cross-Year-Matching:
+    1. exakter Gruppen-Name
+    2. fuzzy-normalized Name
+    3. gkv_section (Top-Level-Gruppe der Sektion bevorzugt)
+    4. konto_nr (Konto landet in der Gruppe wo seine Nr schon existiert)
+    Nur wenn alle Heuristiken scheitern UND es Konten ohne bekannte Nr gibt,
+    wird die Gruppe ans Ende angehaengt."""
+    nr_to_group: dict[str, str] = {}
+    for gname, g in groups_by_name.items():
+        for acc in g["accounts_by_key"].values():
+            nr = acc.get("konto_nr")
+            if nr:
+                nr_to_group[str(nr)] = gname
+
+    norm_to_tpl: dict[str, str] = {
+        _norm_group_name(gname): gname for gname in groups_by_name
+    }
+
+    # gkv_section -> Top-Level-Gruppe der Sektion (Sub-Gruppe nur als Fallback)
+    section_to_tpl: dict[str, str] = {}
+    for gname, g in groups_by_name.items():
+        sec = g.get("gkv_section")
+        if not sec or sec == "neutral":
+            continue
+        is_top = g.get("sub_group_of") is None
+        cur = section_to_tpl.get(sec)
+        if cur is None:
+            section_to_tpl[sec] = gname
+        elif is_top and groups_by_name[cur].get("sub_group_of") is not None:
+            section_to_tpl[sec] = gname  # Top schlaegt Sub
+
     for g in doc.get("groups", []):
         gname = g["name"]
-        seen_groups_in_doc.add(gname)
-        target = groups_by_name.get(gname)
-        if target is None:
-            # Gruppe existiert in diesem älteren JA, aber nicht in der jüngsten
-            # → wir ignorieren sie für jetzt (sonst würde die Reihenfolge bröckeln).
-            # Alternative: anhängen. TODO falls in Praxis nötig.
-            continue
-        # Gruppen-Summe aus PDF (für Cross-Check)
-        if g.get("pdf_sum_gj") is not None:
-            target["column_sums"][col_idx] = g["pdf_sum_gj"]
-        # Konten
+        gnorm = _norm_group_name(gname)
+        gsection = g.get("gkv_section")
+        target_name = (
+            gname if gname in groups_by_name
+            else norm_to_tpl.get(gnorm)
+            or (section_to_tpl.get(gsection) if gsection else None)
+        )
+        if target_name is None:
+            # Pruefen ob alle Konten via konto_nr schon woanders existieren
+            accs = g.get("accounts", [])
+            unrouted = [acc for acc in accs
+                         if not (acc.get("konto_nr") and
+                                 str(acc["konto_nr"]) in nr_to_group)]
+            if unrouted:
+                # Es gibt Konten ohne bekannten Anker -> Gruppe muss angelegt werden
+                target_name = gname
+                new_tpl = {
+                    "name": gname,
+                    "type": g.get("type", "neutral"),
+                    "sub_group_of": g.get("sub_group_of"),
+                    "gkv_section": gsection or "neutral",
+                }
+                group_template.append(new_tpl)
+                groups_by_name[gname] = {
+                    "name": gname,
+                    "type": new_tpl["type"],
+                    "sub_group_of": new_tpl["sub_group_of"],
+                    "gkv_section": new_tpl["gkv_section"],
+                    "column_sums": {},
+                    "accounts_by_key": {},
+                    "account_order": [],
+                }
+                norm_to_tpl[gnorm] = gname
+                if gsection and gsection != "neutral" and gsection not in section_to_tpl:
+                    section_to_tpl[gsection] = gname
+            # else: target_name bleibt None und Konten werden per konto_nr geroutet
+
+        # Gruppen-Summe (PDF) auf Ziel-Gruppe schreiben
+        if target_name and g.get("pdf_sum_gj") is not None:
+            groups_by_name[target_name]["column_sums"][col_idx] = g["pdf_sum_gj"]
+
         for acc in g.get("accounts", []):
-            key = _acc_key(acc, gname)
+            nr = acc.get("konto_nr")
+            nr_key = str(nr) if nr else None
+            # Gruppen-Routing ist authoritativ (Claude hat die Gruppe explizit
+            # gewählt). konto_nr-Routing nur als Fallback wenn keine Zielgruppe
+            # ermittelbar war.
+            acc_target = target_name or (nr_to_group.get(nr_key) if nr_key else None)
+            if acc_target is None:
+                continue
+            target = groups_by_name[acc_target]
+            key = _acc_key(acc, acc_target)
             if key not in target["accounts_by_key"]:
                 target["accounts_by_key"][key] = {
                     "konto_nr": acc.get("konto_nr"),
@@ -198,6 +297,8 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
                     "confidence": acc.get("confidence", "high"),
                 }
                 target["account_order"].append(key)
+                if nr_key:
+                    nr_to_group[nr_key] = acc_target
             target["accounts_by_key"][key]["values"][col_idx] = acc.get("betrag_gj")
 
         # Cross-Check: SUM(Konten) vs pdf_sum_gj
@@ -222,14 +323,14 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
 
 
 def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict,
-                group_template: list = None):
-    """BWA wird wie JA behandelt: groups mit accounts. Konten werden **per
-    Kontonummer** in bestehende Zeilen gemerged, unabhängig davon in welche
-    Gruppe die BWA sie einsortiert.
+                group_template: list):
+    """BWA wird wie JA behandelt: groups mit accounts. Routing-Reihenfolge:
+    1. Per Kontonummer in bestehendes JA-Konto mergen
+    2. Per Gruppen-Name (exact oder fuzzy ohne Nummerierung) in bestehende JA-Gruppe
+    3. Sonst: Gruppe wird als neue Top-Level-Gruppe ans Ende angehängt
 
-    Beispiel: Tasteone BWA-Gruppe 'Material-/Wareneinkauf' mit Konto 5400,
-    JA-Gruppe 'Aufwendungen für Roh-, Hilfs- und Betriebsstoffe' mit Konto 5400.
-    Per Kontonummer-Merge landet 5400-Wert in der gleichen Excel-Zeile.
+    So geht kein Wert verloren -- weder Werte mit unbekannter Konto-Nr noch
+    BWA-only-Gruppen wie 'Sonstige Zinserträge' die in der JA fehlen.
     """
     # Legacy-Struktur (flache positions) — behalten wir für Kompatibilität
     if not doc.get("groups") and doc.get("positions"):
@@ -239,8 +340,7 @@ def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict,
                 target["column_sums"][col_idx] = p.get("betrag")
         return
 
-    # Neue Struktur: groups mit accounts
-    # Globalen konto_nr → group_name Index aufbauen
+    # Index 1: konto_nr → group_name (für JA-übergreifendes Konten-Matching)
     nr_to_group: dict[str, str] = {}
     for gname, g in groups_by_name.items():
         for acc in g["accounts_by_key"].values():
@@ -248,24 +348,53 @@ def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict,
             if nr:
                 nr_to_group[str(nr)] = gname
 
+    # Index 2: normalized name → group_name (für fuzzy Gruppennamen-Matching)
+    norm_to_group: dict[str, str] = {
+        _norm_group_name(gname): gname for gname in groups_by_name
+    }
+
     for g in doc.get("groups", []):
         bwa_gname = g["name"]
-        # Gruppen-Summe auf die Gruppe mit passendem Namen mappen (falls vorhanden)
+        bwa_norm = _norm_group_name(bwa_gname)
+
+        # Resolve target group: exact name → fuzzy name → create new
+        if bwa_gname in groups_by_name:
+            matched_gname = bwa_gname
+        elif bwa_norm in norm_to_group:
+            matched_gname = norm_to_group[bwa_norm]
+        else:
+            # New BWA-only group — append to template + index
+            matched_gname = bwa_gname
+            new_tpl = {
+                "name": bwa_gname,
+                "type": g.get("type", "neutral"),
+                "sub_group_of": g.get("sub_group_of"),
+                "gkv_section": g.get("gkv_section", "neutral"),
+            }
+            group_template.append(new_tpl)
+            groups_by_name[bwa_gname] = {
+                "name": bwa_gname,
+                "type": new_tpl["type"],
+                "sub_group_of": new_tpl["sub_group_of"],
+                "gkv_section": new_tpl["gkv_section"],
+                "column_sums": {},
+                "accounts_by_key": {},
+                "account_order": [],
+            }
+            norm_to_group[bwa_norm] = bwa_gname
+
+        # Gruppen-Summe auf die Zielgruppe schreiben
         if g.get("pdf_sum_gj") is not None:
-            t = groups_by_name.get(bwa_gname)
-            if t is not None:
-                t["column_sums"][col_idx] = g["pdf_sum_gj"]
+            groups_by_name[matched_gname]["column_sums"][col_idx] = g["pdf_sum_gj"]
 
         for acc in g.get("accounts", []):
             nr = acc.get("konto_nr")
             nr_key = str(nr) if nr else None
-            # 1. Preferred: Konto existiert schon (aus JA) — direkt einhängen
+            # Konto existiert schon irgendwo → in dessen Gruppe mergen,
+            # sonst in die per Name geroutete Zielgruppe
             target_gname = nr_to_group.get(nr_key) if nr_key else None
-            # 2. Fallback: Gruppe mit passendem Namen
-            if target_gname is None and bwa_gname in groups_by_name:
-                target_gname = bwa_gname
             if target_gname is None:
-                continue  # kein Ort für das Konto → silently drop
+                target_gname = matched_gname
             target = groups_by_name[target_gname]
             key = _acc_key(acc, target_gname)
             if key not in target["accounts_by_key"]:
@@ -276,7 +405,6 @@ def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict,
                     "confidence": acc.get("confidence", "high"),
                 }
                 target["account_order"].append(key)
-                # Index aktualisieren für folgende Accounts
                 if nr_key:
                     nr_to_group[nr_key] = target_gname
             target["accounts_by_key"][key]["values"][col_idx] = acc.get("betrag_gj")
@@ -284,32 +412,64 @@ def _ingest_bwa(doc: dict, col_idx: int, groups_by_name: dict,
 
 def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                                  groups_by_name: dict, questions: list):
-    """Wenn JA_n Vorjahreswerte enthält, tragen wir die in die Spalte für year n-1 ein,
-    soweit noch nichts drin ist. Mismatch mit dem eigenen Jahr der Vorjahres-PDF
-    → Fragen-Sheet."""
+    """Trage VJ-Werte in die Spalte fuer year n-1 ein. Routing-Reihenfolge wie
+    _ingest_ja: konto_nr (authoritativ) -> exact name -> normalized -> gkv_section.
+    Werte werden nur eingetragen wenn die Spalte noch leer ist; bei Konflikt
+    mit dem Eigenwert -> Fragen-Sheet."""
+    nr_to_group: dict[str, str] = {}
+    for gname, g in groups_by_name.items():
+        for acc in g["accounts_by_key"].values():
+            nr = acc.get("konto_nr")
+            if nr:
+                nr_to_group[str(nr)] = gname
+
+    norm_to_tpl: dict[str, str] = {
+        _norm_group_name(gname): gname for gname in groups_by_name
+    }
+    section_to_tpl: dict[str, str] = {}
+    for gname, g in groups_by_name.items():
+        sec = g.get("gkv_section")
+        if not sec or sec == "neutral":
+            continue
+        is_top = g.get("sub_group_of") is None
+        cur = section_to_tpl.get(sec)
+        if cur is None:
+            section_to_tpl[sec] = gname
+        elif is_top and groups_by_name[cur].get("sub_group_of") is not None:
+            section_to_tpl[sec] = gname
+
     for doc in ja_docs:
         vj = doc.get("previous_year")
         if vj is None:
             continue
-        # Finde Spalten-Index für Vorjahr (erste JA-Spalte mit diesem Jahr)
         vj_col_idx = None
         for idx, col in enumerate(columns):
             if col["kind"] == "ja" and col["year"] == vj:
                 vj_col_idx = idx
                 break
         if vj_col_idx is None:
-            continue  # Vorjahr ist keine eigene Spalte — skippen
+            continue
 
         for g in doc.get("groups", []):
-            target = groups_by_name.get(g["name"])
-            if target is None:
-                continue
+            gname = g["name"]
+            gnorm = _norm_group_name(gname)
+            gsection = g.get("gkv_section")
+            grp_target_name = (
+                gname if gname in groups_by_name
+                else norm_to_tpl.get(gnorm)
+                or (section_to_tpl.get(gsection) if gsection else None)
+            )
             for acc in g.get("accounts", []):
                 if acc.get("betrag_vj") is None:
                     continue
-                key = _acc_key(acc, g["name"])
+                nr = acc.get("konto_nr")
+                nr_key = str(nr) if nr else None
+                acc_target = grp_target_name or (nr_to_group.get(nr_key) if nr_key else None)
+                if acc_target is None:
+                    continue
+                target = groups_by_name[acc_target]
+                key = _acc_key(acc, acc_target)
                 if key not in target["accounts_by_key"]:
-                    # Konto kommt nur im Vorjahr vor — aufnehmen
                     target["accounts_by_key"][key] = {
                         "konto_nr": acc.get("konto_nr"),
                         "bezeichnung": acc.get("bezeichnung", ""),
@@ -317,17 +477,66 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                         "confidence": acc.get("confidence", "high"),
                     }
                     target["account_order"].append(key)
+                    if nr_key:
+                        nr_to_group[nr_key] = acc_target
                 existing = target["accounts_by_key"][key]["values"].get(vj_col_idx)
                 vj_val = acc["betrag_vj"]
                 if existing is not None and abs(existing - vj_val) > MISMATCH_TOLERANCE:
                     questions.append({
                         "type": "previous_year_mismatch",
-                        "group": g["name"], "konto_nr": acc.get("konto_nr"),
+                        "group": acc_target, "konto_nr": acc.get("konto_nr"),
                         "year": vj, "from_doc_year": doc.get("year"),
                         "own_value": existing, "pdf_says": vj_val,
                     })
                 else:
                     target["accounts_by_key"][key]["values"].setdefault(vj_col_idx, vj_val)
+
+
+def _collect_pdf_jue(ja_docs: list[dict], columns: list[dict],
+                      questions: list) -> dict[int, float]:
+    """Sammle PDF-Jahresueberschuss pro Spalte aus den JA-Extraktionen.
+    Eigenjahr-Wert ueberschreibt Vorjahres-Verweise; bei Mismatch zwischen
+    den zwei Quellen wird ein Question-Eintrag erzeugt."""
+    out: dict[int, float] = {}
+    sources: dict[int, str] = {}  # column_idx → "own" | "previous"
+    for doc in ja_docs:
+        own_year = doc.get("year")
+        prev_year = doc.get("previous_year")
+        own_jue = doc.get("pdf_jahresueberschuss_gj")
+        prev_jue = doc.get("pdf_jahresueberschuss_vj")
+        for idx, col in enumerate(columns):
+            if col["kind"] != "ja":
+                continue
+            # Eigenjahr-Quelle ist immer authoritativ
+            if col["year"] == own_year and own_jue is not None:
+                if idx in out and sources.get(idx) == "previous":
+                    if abs(out[idx] - own_jue) > MISMATCH_TOLERANCE:
+                        questions.append({
+                            "type": "pdf_jue_previous_year_mismatch",
+                            "year": col["year"],
+                            "from_doc_year": own_year,
+                            "own_value": own_jue,
+                            "pdf_says": out[idx],
+                        })
+                out[idx] = own_jue
+                sources[idx] = "own"
+            elif col["year"] == prev_year and prev_jue is not None:
+                # Cross-Check: Wenn die Vorjahres-Aussage von doc24 zur
+                # Eigenjahres-Aussage von doc23 differiert -> Mismatch loggen.
+                # Der Eigenjahres-Wert bleibt authoritativ, der VJ-Wert
+                # dient nur dem Cross-Check.
+                if idx in out and abs(out[idx] - prev_jue) > MISMATCH_TOLERANCE:
+                    questions.append({
+                        "type": "pdf_jue_previous_year_mismatch",
+                        "year": col["year"],
+                        "from_doc_year": own_year,
+                        "own_value": out[idx],
+                        "pdf_says": prev_jue,
+                    })
+                if sources.get(idx) != "own":
+                    out[idx] = prev_jue
+                    sources[idx] = "previous"
+    return out
 
 
 def _insert_missing_parents(tpl: list[dict]) -> list[dict]:
@@ -339,11 +548,12 @@ def _insert_missing_parents(tpl: list[dict]) -> list[dict]:
     for g in tpl:
         parent = g.get("sub_group_of")
         if parent and parent not in existing and parent not in inserted:
-            # Inherit type from the first sub with that parent
+            # Inherit type + gkv_section from the first sub with that parent
             out.append({
                 "name": parent,
                 "type": g.get("type", "neutral"),
                 "sub_group_of": None,
+                "gkv_section": g.get("gkv_section", "neutral"),
             })
             inserted.add(parent)
         out.append(g)

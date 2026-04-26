@@ -19,18 +19,56 @@ Claude extrahiert den Kontennachweis der GuV, Output ist eine Excel die die
 FastAPI-Monolith auf Railway, HTMX-UI mit Tailwind-CDN, Claude-API für PDF-Extraktion,
 Supabase für Storage+Postgres, alles in einem Python-Container.
 
-## Kern-Prinzip: PDF ist die Wahrheit
+## Kern-Prinzip: PDF-Struktur + GKV-Anker
 
-**Die Gruppenstruktur der Excel kommt aus der PDF, nicht aus dem HGB.** Jede
-Buchhaltungssoftware gliedert den Kontennachweis anders:
+Jede Buchhaltungssoftware gliedert den Kontennachweis anders:
 
 - DATEV-Standard: "1. Umsatzerlöse", "2. Sonstige betriebliche Erträge", ...
 - Andere Vorlagen: "Raumkosten" und "Fahrzeugkosten" als eigene Hauptkategorien
   statt Sub-Gruppen unter "Sonst. betr. Aufwendungen"
 - Manche mit Nummerierung (5.1-5.5), manche ohne
 
-Claude übernimmt die Struktur wie sie im PDF steht. Der Builder rendert das
-dynamisch. Es gibt **keine feste GUV_HIERARCHY mehr** im Code.
+**Die Gruppen-Reihenfolge und -Bezeichnungen kommen aus der PDF.** Claude
+extrahiert die Konten 1:1. Daneben klassifiziert Claude jede Gruppe per
+`gkv_section`-Slug nach §275 HGB GKV (`umsatzerloese`, `materialaufwand_rhb`,
+`personalaufwand_loehne`, `ee_steuern`, `gewinnvortrag`, ...). Diese
+Klassifikation ist STB-unabhängig und dient als Anker für:
+
+- Multi-Jahr-Cross-Matching (Gruppe in JA-2022 vs JA-2024 selbe Section → gleiche Excel-Zeile)
+- JÜ-Formel-Vorzeichen (Aufwand-Sektionen werden subtrahiert, ertrag-Sektionen addiert)
+- Routing der Bilanzgewinn-Positionen in einen separaten Block am Ende
+
+## Plausibilitäts-Anker
+
+Claude muss `pdf_jahresueberschuss_gj/_vj` als Pflichtfeld liefern. Der Builder
+rendert nach der JÜ-Formel-Zeile:
+
+```
+Jahresergebnis            =Summe-Formel-aus-Gruppen
+PDF-Jahresüberschuss      [Wert aus PDF]
+Differenz Excel ↔ PDF     =JE-Zelle - PDF-Zelle
+```
+
+Build-Zeit-Cross-Check: numerische Excel-JÜ wird gegen PDF-JÜ verglichen, Diff
+> 1 ct landet als `jue_excel_vs_pdf_mismatch` im Fragen-Sheet. Damit kein Excel
+mehr silent falsch ist — der Anwender sieht nach jedem Upload ob der Übertrag
+stimmt.
+
+## Bilanzgewinn-Block
+
+Gewinnvortrag, Verlustvortrag, Ausschüttung, Bilanzgewinn werden NICHT
+ausgefiltert (das war der frühere Hack), sondern landen in einem eigenen Block
+nach dem Jahresergebnis:
+
+```
+--- Bilanzgewinn-Rechnung ---
+Gewinnvortrag             [Konten + Summe]
+Ausschüttung              [Konten + Summe]
+Bilanzgewinn (Formel)     =JE + Gewinnvortrag - Ausschüttung
+```
+
+Routing: per `gkv_section in {gewinnvortrag, ausschuettung, bilanzgewinn}` ODER
+per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
 
 ## Kern-Dateien
 
@@ -54,11 +92,19 @@ dynamisch. Es gibt **keine feste GUV_HIERARCHY mehr** im Code.
   Niemals hardcoded Werte.
 - Werte behalten **ihr Vorzeichen wie im PDF** (Claude normalisiert nicht).
   Die Jahresergebnis-Formel unterscheidet `expenses_negative` vs
-  `expenses_positive` und addiert/subtrahiert entsprechend.
+  `expenses_positive` und addiert/subtrahiert entsprechend. `sign_convention`
+  wird im Builder aus den Daten abgeleitet (Summe der Aufwand/Steuer-Werte),
+  nicht blind aus Claude übernommen.
+- **`gkv_section` ist authoritativ** über `type` für die JÜ-Formel-Klassifikation
+  (siehe `SECTION_ROLE` in `app/excel/builder.py`). Wenn Claude den `type` driftet
+  (z.B. Steuern als "neutral"), wirkt der Section-Slug als Korrektiv.
 - **Sensitive Daten nie in stdout/Bash-Output**: `railway variables` zeigt alles
   Klartext — niemals das Output anzeigen. Nur Namen, nicht Werte.
-- **Keine HGB-Normalisierung**: Wenn eine PDF "Raumkosten" als Hauptgruppe zeigt,
-  bleibt das so. Nicht in ein festes Schema zwingen.
+- **Keine HGB-Normalisierung der Reihenfolge**: Wenn eine PDF "Raumkosten" als
+  Hauptgruppe zeigt, bleibt das so. Aber gkv_section bringt die semantische
+  Standardisierung dazu.
+- **Excel-Zahlenformat**: `'#,##0.00;-#,##0.00'` — kein `[Red]`, neutrale
+  Darstellung mit Minus-Zeichen.
 
 ## Typische Workflows
 
@@ -71,7 +117,13 @@ cd "/Users/philippdegen/Documents/Claude/Calandi/Prozess-Übertrag"
 
 ### Live-Smoketest gegen Claude API
 ```bash
+# synthetisches Mini-PDF, prüft Pipeline ohne reale Daten
 .venv/bin/python3 tests/fixtures/smoketest_claude.py
+
+# End-to-End mit echten JA-PDFs (1+ Pfade), wirft Excel raus + Cross-Check
+.venv/bin/python3 tests/fixtures/smoketest_e2e.py "<pfad/ja1.pdf>" "<pfad/ja2.pdf>" ...
+# Ergebnis-Excel: smoketest_output.xlsx im Projekt-Root
+# Achten auf: Fragen-Sheet (sollte leer sein) + Excel-JÜ ↔ PDF-JÜ-Diff
 ```
 
 ### Deploy
@@ -105,6 +157,19 @@ railway up
   Gruppen aus der konsolidierten Struktur als Dropdown.
 - **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
   Nicht blockieren bei großen Scan-Deals, aber User warnen.
+- **STB-Vorzeichen-Inversionen in VJ-Spalten** (Beispiel: Gewürze-PDFs JA-2023+
+  JA-2024 drucken den VJ-JÜ und VJ-Konten mit umgekehrtem Vorzeichen). Der
+  Plausibilitäts-Anker macht das im Fragen-Sheet sichtbar
+  (`pdf_jue_previous_year_mismatch`, `previous_year_mismatch`), aber wir
+  flippen nicht automatisch — die Inversionen sind nicht trivial vorhersagbar
+  (manche Konten ja, manche nein) und Auto-Flip riskiert silent falsche Werte.
+  Empfohlener Workflow bei Mismatch: betroffene Spalte manuell mit der PDF
+  abgleichen, ggf. den Eigenjahres-PDF-Wert als authoritativ nehmen.
+- **Phase 3 (festes GKV-Layout in §275-Reihenfolge)**: nicht umgesetzt, weil
+  bei DATEV-Standard ohnehin die PDF-Reihenfolge der GKV-Reihenfolge
+  entspricht. Bei exotischen STBs könnte ein erzwungenes GKV-Layout später
+  helfen. Tracking via gkv_section ist schon drin, würde nur den Builder
+  erweitern.
 
 ## Test-Suite
 
