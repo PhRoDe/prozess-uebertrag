@@ -339,3 +339,38 @@ def test_builder_raises_when_all_account_values_empty():
             acc["values"] = {}
     with pytest.raises(ValueError, match="empty"):
         build_excel(cons)
+
+
+def test_jue_formel_addiert_bestandsveraenderung():
+    """JÜ-Formel addiert die Bestandsveränderungs-Gruppe (Werte sind im
+    consolidated bereits signed: + Erhöhung / − Verminderung). Sie darf
+    NICHT als Aufwand subtrahiert werden, sonst würde sie doppelt wirken."""
+    cons = {
+        "columns": [
+            {"label": "2024", "kind": "ja", "year": 2024,
+             "sign_convention": "expenses_negative"},
+        ],
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "column_sums": {},
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "values": {0: 1000000}, "confidence": "high"}]},
+            {"name": "Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag", "gkv_section": "bestandsveraenderung",
+             "sub_group_of": None, "column_sums": {},
+             "accounts": [{"konto_nr": "4815", "bezeichnung": "Bestandsv.",
+                            "values": {0: -614000}, "confidence": "high"}]},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(cons)
+    ws = _ws(xlsx)
+    je_row = _find_row(ws, "Jahresergebnis")
+    bestand_row = _find_row(ws, "Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen")
+    formula = ws.cell(je_row, 3).value  # Spalte 2024 = C
+    assert isinstance(formula, str)
+    # Bestand-Zeile muss in der Formel addiert (+), nicht subtrahiert (−) sein
+    assert f"+C{bestand_row}" in formula or formula.startswith(f"=C{bestand_row}") \
+        or f"=C{bestand_row}+" in formula
+    assert f"-C{bestand_row}" not in formula

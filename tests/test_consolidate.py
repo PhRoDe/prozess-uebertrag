@@ -321,3 +321,114 @@ def test_bwa_only_no_ja_uses_bwa_groups():
     umsatz = next(g for g in r["groups"] if g["name"] == "Umsatzerlöse")
     assert len(umsatz["accounts"]) == 1
     assert umsatz["accounts"][0]["values"][0] == 500000
+
+
+def test_bestandsveraenderung_verminderung_negates_values():
+    """Doc-Gruppe heißt 'Verminderung des Bestandes' — Werte werden beim
+    Konsolidieren negiert, damit positiv = Erhöhung als universelle
+    Konvention im consolidated gilt."""
+    doc = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_negative",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 1000000, "betrag_vj": 900000,
+                            "confidence": "high"}]},
+            {"name": "Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag",
+             "gkv_section": "bestandsveraenderung", "sub_group_of": None,
+             "accounts": [{"konto_nr": "4815",
+                            "bezeichnung": "Bestandsveränderung",
+                            "betrag_gj": 614000.00, "betrag_vj": 2398000.00,
+                            "confidence": "high"}]},
+        ],
+    }
+    r = merge_extractions([doc])
+    bestand = next(g for g in r["groups"] if "Bestand" in g["name"])
+    acc = bestand["accounts"][0]
+    # Position heißt "Verminderung" → Werte negiert
+    assert acc["values"][1] == -614000.00  # 2024 (gj)
+    assert acc["values"][0] == -2398000.00  # 2023 (vj)
+
+
+def test_bestandsveraenderung_erhoehung_keeps_values():
+    """Doc-Gruppe heißt 'Erhöhung des Bestands' — Werte unverändert."""
+    doc = {
+        "type": "jahresabschluss", "year": 2020, "previous_year": 2019,
+        "sign_convention": "expenses_positive",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 8000000, "betrag_vj": 7000000,
+                            "confidence": "high"}]},
+            {"name": "Erhöhung des Bestands an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag",
+             "gkv_section": "bestandsveraenderung", "sub_group_of": None,
+             "accounts": [{"konto_nr": "4815",
+                            "bezeichnung": "Bestandsveränderung",
+                            "betrag_gj": 161100.00, "betrag_vj": 32500.00,
+                            "confidence": "high"}]},
+        ],
+    }
+    r = merge_extractions([doc])
+    bestand = next(g for g in r["groups"] if "Bestand" in g["name"])
+    acc = bestand["accounts"][0]
+    # Position heißt "Erhöhung" → Werte unverändert
+    assert acc["values"][1] == 161100.00  # 2020 (gj)
+    assert acc["values"][0] == 32500.00   # 2019 (vj)
+
+
+def test_bestandsveraenderung_cross_year_mix():
+    """Mehrjahres-Mix: alte JAs 'Erhöhung', neue JAs 'Verminderung'.
+    Konvention im consolidated muss konsistent sein: positiv = Erhöhung."""
+    ja2020 = {
+        "type": "jahresabschluss", "year": 2020, "previous_year": 2019,
+        "sign_convention": "expenses_positive",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 8000000, "betrag_vj": 7000000,
+                            "confidence": "high"}]},
+            {"name": "Erhöhung des Bestands an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag", "gkv_section": "bestandsveraenderung",
+             "sub_group_of": None,
+             "accounts": [{"konto_nr": "4815", "bezeichnung": "Bestandsv.",
+                            "betrag_gj": 161100.00, "betrag_vj": 32500.00,
+                            "confidence": "high"}]},
+        ],
+    }
+    ja2024 = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_negative",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 21000000, "betrag_vj": 19000000,
+                            "confidence": "high"}]},
+            {"name": "Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag", "gkv_section": "bestandsveraenderung",
+             "sub_group_of": None,
+             "accounts": [{"konto_nr": "4815", "bezeichnung": "Bestandsv.",
+                            "betrag_gj": 614000.00, "betrag_vj": 2398000.00,
+                            "confidence": "high"}]},
+        ],
+    }
+    r = merge_extractions([ja2020, ja2024])
+    bestand = next(g for g in r["groups"] if "Bestand" in g["name"])
+    acc = bestand["accounts"][0]
+    # Spalten-Order: 2019, 2020, 2023, 2024
+    cols = [c["year"] for c in r["columns"]]
+    assert cols == [2019, 2020, 2023, 2024]
+    # 2019 (vj von 2020 'Erhöhung'): +32500
+    assert acc["values"][cols.index(2019)] == 32500.00
+    # 2020 (own von 2020 'Erhöhung'): +161100
+    assert acc["values"][cols.index(2020)] == 161100.00
+    # 2023 (vj von 2024 'Verminderung'): negiert -> -2398000
+    assert acc["values"][cols.index(2023)] == -2398000.00
+    # 2024 (own von 2024 'Verminderung'): negiert -> -614000
+    assert acc["values"][cols.index(2024)] == -614000.00

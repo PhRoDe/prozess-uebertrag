@@ -40,7 +40,11 @@ REGELN:
 
 2. **Gruppennamen**: exakt übernehmen, inklusive Nummerierung falls vorhanden
    (z.B. "1. Umsatzerlöse" oder "5.1 Versicherungen, Beiträge und Abgaben"
-   oder einfach "Umsatzerlöse" ohne Nummer).
+   oder einfach "Umsatzerlöse" ohne Nummer). Nicht vereinheitlichen oder
+   normalisieren. Besonders wichtig bei GKV §275 Pos 2: das PDF schreibt
+   entweder "Erhöhung des Bestands" (Bestand wuchs) oder "Verminderung des
+   Bestandes" (Bestand schrumpfte) — beide haben gegenteilige JÜ-Wirkung.
+   Wörtlich übernehmen, nicht zu einem Standard-Begriff vereinheitlichen.
 
 3. **Vorzeichen**: übernimm die Werte mit dem Vorzeichen wie im PDF. Wenn
    Aufwände dort negativ angezeigt werden, bleiben sie negativ. Wenn positiv,
@@ -96,9 +100,18 @@ REGELN:
    negative Zahlen dargestellt werden → "expenses_negative". Wenn sie positiv
    sind → "expenses_positive".
 
-7. **Gruppen-Summe**: wenn die PDF eine Zwischensumme pro Gruppe zeigt,
-   gib sie als `pdf_sum_gj` / `pdf_sum_vj` an. Das erlaubt uns später einen
-   Cross-Check: SUM(Einzelkonten) = PDF-Summe?
+7. **Gruppen-Summe**: nur ausgeben wenn die Zahl WÖRTLICH im PDF an einer
+   Stelle steht die als Gruppen-Summe erkennbar ist. Typische Stellen:
+   - In der GuV-Übersicht direkt neben der Position (z.B.
+     "7. Sonstige betriebliche Aufwendungen   495.700,81")
+   - Als letzte Zeile direkt nach dem letzten Konto der Gruppe, oft mit
+     Wiederholung des Gruppen-Namens
+   NIEMALS:
+   - Werte selbst aufsummieren oder berechnen
+   - "Übertrag X" / "Vortrag X" am Seitenende mitnehmen — das sind
+     Layout-Helfer für mehrseitige Tabellen, KEINE Gruppen-Summen
+   - Übertrag + echte Summe addieren (das verfälscht den Wert)
+   Wenn keine explizite Gruppensumme im PDF steht: Feld weglassen (null).
 
 8. **Geschäftsjahr + Vorjahr**: PDFs zeigen meist zwei Jahre. Extrahiere
    beide. `year` = aktuelles Geschäftsjahr, `previous_year` = Vorjahr.

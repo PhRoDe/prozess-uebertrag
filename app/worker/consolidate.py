@@ -13,6 +13,27 @@ from typing import Any
 MISMATCH_TOLERANCE = 0.01  # 1 cent
 
 
+def _bestand_sign_factor(group: dict) -> int:
+    """Bestandsveränderung universal vorzeichen-normalisieren.
+
+    Convention im consolidated:
+      positiv = Erhöhung des Bestandes (Ertrag, +JÜ)
+      negativ = Verminderung des Bestandes (Aufwand, -JÜ)
+
+    Wenn die Doc-Gruppe in einem JA "Verminderung des Bestandes" heißt,
+    extrahiert Claude den Wert typischerweise positiv (PDF-Layout). Wir
+    negieren ihn beim Schreiben damit alle Jahre dieselbe Konvention nutzen.
+    Heißt der Eintrag "Erhöhung" → Wert unverändert. So funktioniert die
+    JÜ-Formel "+ Bestandsveränderung" konsistent über alle Jahre.
+    """
+    if group.get("gkv_section") != "bestandsveraenderung":
+        return 1
+    name_lc = (group.get("name") or "").lower()
+    if "verminderung" in name_lc and "bestand" in name_lc:
+        return -1
+    return 1
+
+
 def _norm_group_name(name: str) -> str:
     """Normalize a group name for fuzzy matching: strip leading
     numbering (1., 5.1, a)) and lowercase. Lets BWA-Group 'Umsatzerlöse'
@@ -278,6 +299,7 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
         if target_name and g.get("pdf_sum_gj") is not None:
             groups_by_name[target_name]["column_sums"][col_idx] = g["pdf_sum_gj"]
 
+        sign_factor = _bestand_sign_factor(g)
         for acc in g.get("accounts", []):
             nr = acc.get("konto_nr")
             nr_key = str(nr) if nr else None
@@ -299,7 +321,10 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
                 target["account_order"].append(key)
                 if nr_key:
                     nr_to_group[nr_key] = acc_target
-            target["accounts_by_key"][key]["values"][col_idx] = acc.get("betrag_gj")
+            betrag = acc.get("betrag_gj")
+            if betrag is not None and sign_factor != 1:
+                betrag = betrag * sign_factor
+            target["accounts_by_key"][key]["values"][col_idx] = betrag
 
         # Cross-Check: SUM(Konten) vs pdf_sum_gj
         if g.get("pdf_sum_gj") is not None:
@@ -459,6 +484,7 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                 else norm_to_tpl.get(gnorm)
                 or (section_to_tpl.get(gsection) if gsection else None)
             )
+            sign_factor = _bestand_sign_factor(g)
             for acc in g.get("accounts", []):
                 if acc.get("betrag_vj") is None:
                     continue
@@ -481,6 +507,8 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                         nr_to_group[nr_key] = acc_target
                 existing = target["accounts_by_key"][key]["values"].get(vj_col_idx)
                 vj_val = acc["betrag_vj"]
+                if sign_factor != 1:
+                    vj_val = vj_val * sign_factor
                 if existing is not None and abs(existing - vj_val) > MISMATCH_TOLERANCE:
                     questions.append({
                         "type": "previous_year_mismatch",

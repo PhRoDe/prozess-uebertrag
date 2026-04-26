@@ -31,7 +31,7 @@ BILANZGEWINN_SECTIONS = {"gewinnvortrag", "ausschuettung", "bilanzgewinn"}
 # Claude beim type-Feld haeufiger driftet als bei der GKV-Klassifikation.
 SECTION_ROLE: dict[str, str] = {
     "umsatzerloese": "ertrag",
-    "bestandsveraenderung": "ertrag",  # Verminderung wird per Name-Sonderfall subtrahiert
+    "bestandsveraenderung": "ertrag",  # Werte sind im consolidated normalisiert (+ Erhöhung / − Verminderung)
     "aktivierte_eigenleistungen": "ertrag",
     "sonst_betr_ertraege": "ertrag",
     "materialaufwand_rhb": "aufwand",
@@ -241,16 +241,6 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
                 continue
-            # Spezialfall: Verminderung des Bestandes wirkt IMMER mindernd auf
-            # den JÜ. Der Wert kann positiv (Bestand sank) oder negativ (Bestand
-            # stieg) sein — in beiden Fällen ist JÜ-Beitrag = -Wert. Subtraktion
-            # macht das semantisch korrekt unabhängig vom Vorzeichen.
-            name_lc = (g.get("name") or "").lower()
-            is_verminderung = "verminderung" in name_lc and "bestand" in name_lc
-            if is_verminderung:
-                parts_minus.append(sum_r)
-                continue
-
             role = _resolve_role(g)
             if conv == "expenses_negative":
                 # Alles addieren — Aufwände sind eh negativ
@@ -396,9 +386,10 @@ def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
     """Robustifiziert die GKV-Klassifikation per Name-Match (Defense-in-Depth
     falls Claude `gkv_section` nicht oder falsch setzt).
 
-    GKV §275 Pos 2: 'Erhöhung ODER Verminderung des Bestandes an fertigen und
-    unfertigen Erzeugnissen'. PDFs labeln das oft als 'Verminderung' mit positivem
-    Wert — dann ist die Position real ein Aufwand.
+    GKV §275 Pos 2: Bestandsveränderung. Die Werte sind beim Konsolidieren
+    bereits normalisiert: positiv = Erhöhung (+JÜ), negativ = Verminderung
+    (-JÜ). Daher wird die Gruppe hier IMMER als Ertrag-Position eingestuft
+    und in der JÜ-Formel addiert — das Vorzeichen entscheidet die Wirkung.
 
     'Gewinnvortrag', 'Verlustvortrag', 'Bilanzgewinn', 'Bilanzverlust',
     'Ausschüttung' sind Eigenkapital-Bewegungen (Bilanzgewinn-Rechnung), NICHT
@@ -414,10 +405,9 @@ def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
             out.append({**g, "gkv_section": "ausschuettung"})
         elif ("bilanzgewinn" in name_lc or "bilanzverlust" in name_lc):
             out.append({**g, "gkv_section": "bilanzgewinn"})
-        elif "verminderung" in name_lc and "bestand" in name_lc:
-            out.append({**g, "type": "aufwand",
-                        "gkv_section": g.get("gkv_section") or "bestandsveraenderung"})
-        elif "erhöhung" in name_lc and "bestand" in name_lc:
+        elif (("verminderung" in name_lc or "erhöhung" in name_lc
+                or "bestandsveränderung" in name_lc)
+               and "bestand" in name_lc):
             out.append({**g, "type": "ertrag",
                         "gkv_section": g.get("gkv_section") or "bestandsveraenderung"})
         else:
@@ -561,11 +551,6 @@ def _compute_excel_jue_per_column(groups: list[dict],
                         v = acc.get("values", {}).get(col_idx)
                         if isinstance(v, (int, float)):
                             grp_sum += v
-            name_lc = (g.get("name") or "").lower()
-            is_verminderung = "verminderung" in name_lc and "bestand" in name_lc
-            if is_verminderung:
-                total -= grp_sum
-                continue
             role = _resolve_role(g)
             if conv == "expenses_negative":
                 total += grp_sum
