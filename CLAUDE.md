@@ -98,6 +98,31 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
 - **`gkv_section` ist authoritativ** über `type` für die JÜ-Formel-Klassifikation
   (siehe `SECTION_ROLE` in `app/excel/builder.py`). Wenn Claude den `type` driftet
   (z.B. Steuern als "neutral"), wirkt der Section-Slug als Korrektiv.
+- **Bestandsveränderung universal** (`_normalize_bestand_value` in
+  `consolidate.py`): Bei `gkv_section="bestandsveraenderung"` ist der
+  Position-Name authoritativ — "Erhöhung" → `+|wert|`, "Verminderung" →
+  `-|wert|`. Eingehendes Vorzeichen wird ignoriert. Damit funktioniert die
+  Formel egal welche STB-Vorzeichen-Konvention das PDF nutzt. Die JÜ-Formel
+  addiert die Gruppe (das Vorzeichen entscheidet die Wirkung).
+- **JSON-Roundtrip-sicher**: int-Keys in `values: {col_idx: ...}` werden beim
+  Speichern in Postgres JSONB zu Strings. `_coerce_int_keys` im Builder casted
+  sie beim Eintreten zurück. Niemals direkt mit int auf das Dict zugreifen
+  ohne vorher zu coercen.
+- **Build-Time-Plausibilitäts-Anker**: Excel-JÜ ↔ PDF-JÜ wird centgenau
+  geprüft. Diff > 1 ct → `ValueError` aus `build_excel`, Job geht auf
+  FAILED. Kein silently fehlerhaftes Excel wird ausgeliefert. Das fängt
+  systemische Bugs (Cross-Year-Routing, Vorzeichen, Doppelzählung) hart ab.
+- **BWA-Aggregat-Doppelzählung verhindert**: BWA-Aggregat-Gruppen ohne
+  eigene Konten (Personalkosten, Raumkosten etc., die JA-Gruppen
+  zusammenfassen) werden in der JÜ-Formel übersprungen wenn die Spalte
+  bereits Konten-Daten in JA-Top-Level-Gruppen hat. Heuristik in
+  `build_excel`: `col_has_account_data and not g.get("accounts")` → skip.
+- **Stille Auflösung von Audit-Mismatches**:
+  - `previous_year_mismatch`: Eigenjahres-Wert ist authoritativ (`setdefault`
+    schreibt VJ-Wert nur wenn Spalte leer). Kein Fragen-Sheet-Eintrag.
+  - `group_sum_mismatch`: Konten-Summe ist authoritativ über `pdf_sum_gj`
+    (Claude erfindet den manchmal via Übertrag-Doppelzählung). Kein Eintrag.
+  - `unmatched_account` bleibt im Fragen-Sheet — echte User-Entscheidung.
 - **Sensitive Daten nie in stdout/Bash-Output**: `railway variables` zeigt alles
   Klartext — niemals das Output anzeigen. Nur Namen, nicht Werte.
 - **Keine HGB-Normalisierung der Reihenfolge**: Wenn eine PDF "Raumkosten" als
@@ -157,14 +182,13 @@ railway up
   Gruppen aus der konsolidierten Struktur als Dropdown.
 - **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
   Nicht blockieren bei großen Scan-Deals, aber User warnen.
-- **STB-Vorzeichen-Inversionen in VJ-Spalten** (Beispiel: Gewürze-PDFs JA-2023+
-  JA-2024 drucken den VJ-JÜ und VJ-Konten mit umgekehrtem Vorzeichen). Der
-  Plausibilitäts-Anker macht das im Fragen-Sheet sichtbar
-  (`pdf_jue_previous_year_mismatch`, `previous_year_mismatch`), aber wir
-  flippen nicht automatisch — die Inversionen sind nicht trivial vorhersagbar
-  (manche Konten ja, manche nein) und Auto-Flip riskiert silent falsche Werte.
-  Empfohlener Workflow bei Mismatch: betroffene Spalte manuell mit der PDF
-  abgleichen, ggf. den Eigenjahres-PDF-Wert als authoritativ nehmen.
+- **STB-Vorzeichen-Inversionen in VJ-Spalten**: STBs drucken VJ-Konten oft mit
+  umgekehrtem Vorzeichen vs. der eigenen Spalte des entsprechenden Jahres.
+  Mit der aktuellen Logik ist der **Eigenjahres-Wert authoritativ** —
+  VJ-Werte werden nur per `setdefault` ergänzt, der Mismatch wird
+  stillschweigend aufgelöst. Praxis: Wenn ein Jahr **nur** als VJ vorliegt
+  (kein eigenes JA hochgeladen), kann das Vorzeichen für dieses Jahr
+  falsch sein. Einziger Workaround: das fehlende JA hochladen.
 - **Phase 3 (festes GKV-Layout in §275-Reihenfolge)**: nicht umgesetzt, weil
   bei DATEV-Standard ohnehin die PDF-Reihenfolge der GKV-Reihenfolge
   entspricht. Bei exotischen STBs könnte ein erzwungenes GKV-Layout später

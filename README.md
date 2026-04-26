@@ -16,11 +16,22 @@ Siehe `CLAUDE.md` für die Entwickler-Perspektive,
 - Extraktion pro PDF, Multi-Jahres-Konsolidierung mit Cross-Check
 - **Excel übernimmt die PDF-Gliederung** + GKV-Sektion-Klassifikation (§275 HGB)
   als STB-unabhängiger Anker für Multi-Jahr-Matching
-- **Plausibilitäts-Anker:** Excel zeigt PDF-JÜ + Differenz-Zeile am Ende; Diff
-  > 1 ct erscheint automatisch im Fragen-Sheet
+- **Plausibilitäts-Anker mit hartem Fail:** Excel-JÜ wird centgenau gegen
+  PDF-Jahresüberschuss verglichen. Diff > 1 ct → Job FAILT, kein silently
+  fehlerhaftes Excel wird ausgeliefert
+- **Bestandsveränderung universal**: Erhöhung/Verminderung-Position wird per
+  Name normalisiert (`+|wert|` für Erhöhung, `-|wert|` für Verminderung) —
+  egal welche STB-Vorzeichen-Konvention das PDF nutzt
 - **Bilanzgewinn-Block** (Gewinnvortrag, Ausschüttung, Bilanzgewinn) als eigene
   Sektion nach dem Jahresergebnis mit Bilanzgewinn-Formel
-- Vorjahres-Mismatch- und Summen-Mismatch-Checks im separaten "Fragen"-Sheet
+- **Stille Auflösung von Audit-Mismatches**: Eigenjahres-Werte gewinnen gegen
+  VJ-Werte aus Folge-JAs (klassische STB-Vorzeichen-Inversion); Konten-Summe
+  ist authoritativ über pdf_sum_gj (fängt Claude-Übertrags-Doppelzählung)
+- **BWA-Aggregat-Doppelzählung verhindert**: Wenn eine Spalte schon Konten-Daten
+  in JA-Top-Level-Gruppen hat, werden reine BWA-Aggregat-Sichten in der
+  JÜ-Formel übersprungen
+- "Fragen"-Sheet wird **nur** angelegt wenn echte User-Entscheidungen offen
+  sind (z.B. abgeschnittene Konto-Bezeichnungen) — bei sauberen Läufen: kein Sheet
 - Ad-hoc-Nutzung, alle Dateien werden nach 24h automatisch gelöscht
 - Team-Passwort-Login, Session-Cookie, Brute-Force- und Upload-Rate-Limit
 
@@ -40,7 +51,7 @@ Output: ein Excel-Sheet "Übertrag" mit:
 | … | | | | | |
 | | **Jahresergebnis** | `=C… +C… -C… …` | | | |
 
-Nur das "Übertrag"-Sheet plus ein "Fragen"-Sheet mit Datenqualitäts-Hinweisen.
+Nur das "Übertrag"-Sheet — und (nur bei tatsächlich offenen User-Entscheidungen) ein "Fragen"-Sheet.
 
 ## Lokale Entwicklung
 
@@ -160,7 +171,12 @@ railway up
   Pflicht (semantischer Anker für JÜ-Formel + Cross-Year-Matching).
 - Claude übernimmt Vorzeichen **1:1 aus der PDF**. Die `sign_convention` wird
   im Builder aus den Daten abgeleitet, nicht blind aus Claude übernommen.
-- `pdf_jahresueberschuss_gj/_vj` ist Pflicht — Builder zeigt PDF-JÜ vs
-  Excel-JÜ-Diff am Ende, Diff > 1 ct landet im Fragen-Sheet.
+- `pdf_jahresueberschuss_gj/_vj` ist Pflicht — Builder vergleicht Excel-JÜ
+  numerisch gegen PDF-JÜ und wirft `ValueError` bei Diff > 1 ct (Job FAILT).
+- `previous_year_mismatch` und `group_sum_mismatch` werden **stillschweigend
+  aufgelöst** (Eigenjahr / Konten-Summe authoritativ), nicht im Fragen-Sheet.
+- `pdf_sum_gj` von Claude **niemals selbst rechnen lassen** — Claude darf den
+  Wert nur wörtlich aus dem PDF liefern (Übertrags-Zeilen am Seitenende sind
+  KEINE Gruppen-Summen). Konten-Summe gewinnt sowieso bei Konflikt.
 - Änderungen an Prompts (`app/worker/prompts.py`) immer mit
   `tests/fixtures/smoketest_e2e.py` gegen echte JA-PDFs verifizieren.
