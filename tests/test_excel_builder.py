@@ -139,18 +139,24 @@ def test_pdf_jue_row_rendered_when_pdf_value_present():
     assert isinstance(diff_formula, str) and diff_formula.startswith("=")
 
 
-def test_pdf_jue_mismatch_logged_to_questions():
-    """JÜ-Formel weicht vom PDF-Wert ab → Eintrag im Fragen-Sheet."""
+def test_pdf_jue_mismatch_raises_value_error():
+    """JÜ-Formel weicht vom PDF-Wert ab → Build muss FAILEN, nicht ein
+    fehlerhaftes Excel ausliefern. Job geht so auf Status FAILED, der User
+    sieht eine konkrete Fehlermeldung."""
     cons = _sample()
-    # Sample: Umsatzerlöse 1000000, Materialaufwand -400000 → JÜ = 600000.
-    # PDF-JÜ (z.B. via Claude-Mistake) sagt 700000 → Diff 100000 → Frage.
     cons["pdf_jue_per_column"] = {0: 530000.00, 1: 700000.00}
+    with pytest.raises(ValueError, match="Excel-Jahresergebnis stimmt nicht"):
+        build_excel(cons)
+
+
+def test_no_fragen_sheet_when_clean():
+    """Bei sauberem Lauf (keine echten User-Entscheidungen offen) wird das
+    Fragen-Sheet gar nicht erst angelegt."""
+    cons = _sample()
+    cons["questions"] = []
     xlsx = build_excel(cons)
     wb = load_workbook(io.BytesIO(xlsx))
-    fragen = wb["Fragen"]
-    rows = list(fragen.iter_rows(values_only=True))
-    themes = [r[0] for r in rows]
-    assert "jue_excel_vs_pdf_mismatch" in themes
+    assert "Fragen" not in wb.sheetnames
 
 
 def test_bilanzgewinn_block_separate_from_jue():

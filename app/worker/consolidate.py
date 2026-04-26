@@ -329,15 +329,10 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
             betrag = _normalize_bestand_value(g, acc.get("betrag_gj"))
             target["accounts_by_key"][key]["values"][col_idx] = betrag
 
-        # Cross-Check: SUM(Konten) vs pdf_sum_gj
-        if g.get("pdf_sum_gj") is not None:
-            real_sum = sum(a.get("betrag_gj") or 0 for a in g.get("accounts", []))
-            if abs(real_sum - g["pdf_sum_gj"]) > MISMATCH_TOLERANCE:
-                questions.append({
-                    "type": "group_sum_mismatch",
-                    "group": gname, "year": year,
-                    "pdf_says": g["pdf_sum_gj"], "accounts_sum": real_sum,
-                })
+        # Konten-Summe ist authoritativ — pdf_sum_gj kann von Claude erfunden
+        # sein (z.B. Übertrag-Doppelzählung bei mehrseitigen Tabellen). Wir
+        # vertrauen den einzeln nachvollziehbaren Konto-Werten und ignorieren
+        # einen Mismatch zur PDF-Summe stillschweigend.
 
     # open_questions übertragen
     for oq in doc.get("open_questions", []):
@@ -507,17 +502,11 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                     target["account_order"].append(key)
                     if nr_key:
                         nr_to_group[nr_key] = acc_target
-                existing = target["accounts_by_key"][key]["values"].get(vj_col_idx)
+                # Eigenjahres-Wert ist authoritativ. Bei Mismatch zur VJ-Spalte
+                # eines anderen JAs (klassische STB-Vorzeichen-Inversion) lassen
+                # wir den existing-Wert stehen, ohne den User zu belästigen.
                 vj_val = _normalize_bestand_value(g, acc["betrag_vj"])
-                if existing is not None and abs(existing - vj_val) > MISMATCH_TOLERANCE:
-                    questions.append({
-                        "type": "previous_year_mismatch",
-                        "group": acc_target, "konto_nr": acc.get("konto_nr"),
-                        "year": vj, "from_doc_year": doc.get("year"),
-                        "own_value": existing, "pdf_says": vj_val,
-                    })
-                else:
-                    target["accounts_by_key"][key]["values"].setdefault(vj_col_idx, vj_val)
+                target["accounts_by_key"][key]["values"].setdefault(vj_col_idx, vj_val)
 
 
 def _collect_pdf_jue(ja_docs: list[dict], columns: list[dict],

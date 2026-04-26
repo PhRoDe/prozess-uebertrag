@@ -359,21 +359,27 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             c.font = BOLD_LIGHT
 
         # Build-Zeit-Cross-Check: Excel-JUE numerisch berechnen und gegen PDF-JUE
-        # vergleichen. Diff > 1 ct -> Fragen-Sheet
+        # vergleichen. Diff > 1 ct → ValueError, Job geht auf FAILED. Damit kein
+        # silently falsches Excel ausgeliefert wird.
         excel_jue = _compute_excel_jue_per_column(groups, columns)
+        jue_errors = []
         for col_idx, col in enumerate(columns):
             pdf_v = pdf_jue_per_column.get(col_idx)
             excel_v = excel_jue.get(col_idx)
             if pdf_v is None or excel_v is None:
                 continue
             if abs(excel_v - pdf_v) > 0.01:
-                questions.append({
-                    "type": "jue_excel_vs_pdf_mismatch",
-                    "year": col.get("year"),
-                    "column_label": col.get("label"),
-                    "pdf_says": pdf_v,
-                    "excel_says": round(excel_v, 2),
-                })
+                jue_errors.append(
+                    f"{col.get('label')}: PDF-JÜ {pdf_v:,.2f} ≠ Excel-JÜ "
+                    f"{excel_v:,.2f} (Diff {excel_v - pdf_v:+,.2f})"
+                )
+        if jue_errors:
+            raise ValueError(
+                "Excel-Jahresergebnis stimmt nicht mit PDF-Jahresüberschuss überein. "
+                "Mögliche Ursachen: fehlende/falsch extrahierte Konten, "
+                "Vorzeichen-Probleme, Cross-Year-Routing. Bitte PDF prüfen oder "
+                "Job neu starten.\nBetroffen:\n  - " + "\n  - ".join(jue_errors)
+            )
 
     # Spaltenbreiten
     ws.column_dimensions["A"].width = 10
@@ -381,12 +387,16 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     for idx in range(len(columns)):
         ws.column_dimensions[get_column_letter(3 + idx)].width = 14
 
-    # Fragen-Sheet
-    fragen = wb.create_sheet("Fragen")
-    fragen.append(["Thema", "Details"])
-    for q in questions:
-        details = _format_question(q)
-        fragen.append([q.get("type", ""), details])
+    # Fragen-Sheet — nur anlegen wenn echte User-Entscheidungen offen sind
+    # (z.B. unmatched_account). Reine Audit-Mismatches (previous_year, group_sum,
+    # jue) werden intern aufgelöst bzw. failen den Job — sie kommen hier nicht
+    # mehr an.
+    if questions:
+        fragen = wb.create_sheet("Fragen")
+        fragen.append(["Thema", "Details"])
+        for q in questions:
+            details = _format_question(q)
+            fragen.append([q.get("type", ""), details])
 
     buf = io.BytesIO()
     wb.save(buf)

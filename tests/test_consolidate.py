@@ -73,7 +73,9 @@ def test_multi_year_ja_matches_accounts_by_konto_nr():
     assert vals_by_year[2024] == 1000000
 
 
-def test_previous_year_mismatch_logged_to_questions():
+def test_previous_year_mismatch_resolved_silently():
+    """Eigenjahres-Wert ist authoritativ. Mismatch zur VJ-Spalte eines anderen
+    JAs wird stillschweigend aufgelöst — kein Eintrag im Fragen-Sheet."""
     doc23 = _ja(2023, 2022, [
         _grp("Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse 19%", 900000, 800000)]),
     ])
@@ -81,23 +83,24 @@ def test_previous_year_mismatch_logged_to_questions():
         _grp("Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse 19%", 1000000, 950000)]),
     ])
     r = merge_extractions([doc23, doc24])
-    mismatches = [q for q in r["questions"] if q["type"] == "previous_year_mismatch"]
-    assert len(mismatches) == 1
-    assert mismatches[0]["konto_nr"] == "8400"
-    assert mismatches[0]["year"] == 2023
+    assert not [q for q in r["questions"] if q["type"] == "previous_year_mismatch"]
+    # Eigenjahr 2023 (=900000) gewinnt gegen VJ-Wert 950000 aus JA2024
+    umsatz = next(g for g in r["groups"] if g["name"] == "Umsatzerlöse")
+    cols_2023 = next(i for i, c in enumerate(r["columns"]) if c["year"] == 2023)
+    assert umsatz["accounts"][0]["values"][cols_2023] == 900000
 
 
-def test_group_sum_mismatch_detected():
+def test_group_sum_mismatch_resolved_silently():
+    """Konten-Summe ist authoritativ. Wenn die PDF-Summe von Claude erfunden ist
+    (typisch: Übertrag-Doppelzählung), wird das stillschweigend ignoriert."""
     doc = _ja(2024, 2023, [
         _grp("Umsatzerlöse", "ertrag",
              [_acc("8400", "Erlöse 19%", 1000000, 900000)],
-             pdf_sum_gj=1500000,  # PDF-Summe weicht ab
+             pdf_sum_gj=1500000,
              pdf_sum_vj=900000),
     ])
     r = merge_extractions([doc])
-    mismatches = [q for q in r["questions"] if q["type"] == "group_sum_mismatch"]
-    assert len(mismatches) == 1
-    assert mismatches[0]["group"] == "Umsatzerlöse"
+    assert not [q for q in r["questions"] if q["type"] == "group_sum_mismatch"]
 
 
 def test_bwa_creates_separate_column_with_group_sums_only():
