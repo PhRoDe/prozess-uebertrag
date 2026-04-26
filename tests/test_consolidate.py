@@ -432,3 +432,33 @@ def test_bestandsveraenderung_cross_year_mix():
     assert acc["values"][cols.index(2023)] == -2398000.00
     # 2024 (own von 2024 'Verminderung'): negiert -> -614000
     assert acc["values"][cols.index(2024)] == -614000.00
+
+
+def test_bestandsveraenderung_verminderung_with_negative_value():
+    """Wenn Claude (mit neuem Prompt) bereits ein Minus liefert: Wert wird
+    nicht doppelt negiert. Konvention: -abs(value) für Verminderung."""
+    doc = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_negative",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 1000000, "betrag_vj": 900000,
+                            "confidence": "high"}]},
+            {"name": "Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag",
+             "gkv_section": "bestandsveraenderung", "sub_group_of": None,
+             "accounts": [{"konto_nr": "4815",
+                            "bezeichnung": "Bestandsveränderung",
+                            "betrag_gj": -614000.00, "betrag_vj": -2398000.00,
+                            "confidence": "high"}]},
+        ],
+    }
+    r = merge_extractions([doc])
+    bestand = next(g for g in r["groups"] if "Bestand" in g["name"])
+    acc = bestand["accounts"][0]
+    # Beide Werte sind bereits negativ — die Konvention ist -abs(...),
+    # darf also nicht zu +614000 / +2398000 werden
+    assert acc["values"][1] == -614000.00
+    assert acc["values"][0] == -2398000.00
