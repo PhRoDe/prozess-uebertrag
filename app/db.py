@@ -74,16 +74,4 @@ class JobsRepo:
         }).eq("id", job_id).execute()
 
     def _row_to_job(self, row: dict[str, Any]) -> Job:
-        return Job(
-            id=row["id"],
-            created_at=row["created_at"],
-            status=JobStatus(row["status"]),
-            input_files=[InputFile(**f) for f in row["input_files"]],
-            extraction=row.get("extraction"),
-            review_answers=row.get("review_answers"),
-            output_path=row.get("output_path"),
-            error_message=row.get("error_message"),
-            expires_at=row["expires_at"],
-            processing_node=row.get("processing_node"),
-            processing_started_at=row.get("processing_started_at"),
-        )
+        return Job.model_validate(row)

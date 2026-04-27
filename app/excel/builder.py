@@ -436,45 +436,6 @@ def _reclassify_bestandsveraenderung(groups: list[dict]) -> list[dict]:
     return out
 
 
-def _normalize_verminderung_signs(groups: list[dict],
-                                    columns: list[dict]) -> list[dict]:
-    """Verminderung-Bestand-Werte ans Vorzeichen-Schema der Spalte anpassen.
-
-    Claude extrahiert Aufwände manchmal positiv (typisch GuV-Layout) und
-    manchmal negativ (Layout mit Minus-Endung). Innerhalb einer Spalte sollte
-    die Konvention konsistent sein, damit die JÜ-Formel funktioniert. Bei
-    Verminderung-Bestand stimmt das Vorzeichen oft nicht mit den anderen
-    Aufwänden derselben Spalte überein → wir flippen es an.
-    """
-    out = []
-    for g in groups:
-        nl = (g.get("name") or "").lower()
-        if not ("verminderung" in nl and "bestand" in nl):
-            out.append(g)
-            continue
-        new_accounts = []
-        for acc in g.get("accounts", []):
-            new_values = {}
-            for col_idx, v in (acc.get("values") or {}).items():
-                if not isinstance(v, (int, float)) or v == 0:
-                    new_values[col_idx] = v
-                    continue
-                if col_idx >= len(columns):
-                    new_values[col_idx] = v
-                    continue
-                conv = columns[col_idx].get("sign_convention", "expenses_negative")
-                # expenses_negative: Aufwände sollten negativ sein → positiv flippen
-                # expenses_positive: Aufwände sollten positiv sein → negativ flippen
-                if (conv == "expenses_negative" and v > 0) or \
-                   (conv == "expenses_positive" and v < 0):
-                    new_values[col_idx] = -v
-                else:
-                    new_values[col_idx] = v
-            new_accounts.append({**acc, "values": new_values})
-        out.append({**g, "accounts": new_accounts})
-    return out
-
-
 def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dict]:
     """Leite sign_convention pro Spalte aus den echten Aufwand/Steuer-Werten ab.
     Mehrheit negativ → expenses_negative (einfache Summen-Formel fürs Jahresergebnis).
