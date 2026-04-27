@@ -11,3 +11,5 @@ tests/fixtures/*.pdf
 .ruff_cache/
 .DS_Store
 .gstack/
+smoketest_output.xlsx
+~$*.xlsx

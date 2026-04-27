@@ -68,7 +68,9 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
         }
     """
     ja_docs = [e for e in extractions if e.get("type") == "jahresabschluss"]
-    bwa_docs = [e for e in extractions if e.get("type") == "bwa"]
+    # Susa wird wie BWA behandelt: eigene Spalte mit Konten-Salden, kein
+    # eigener Endwert. Beide Typen tragen `period_label` und `year`.
+    bwa_docs = [e for e in extractions if e.get("type") in ("bwa", "susa")]
 
     # 1. Spalten-Reihenfolge aufbauen.
     # JAs sortiert nach year, BWAs dazwischen nach ihrem year.
@@ -167,8 +169,16 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
             "accounts": accounts,
         })
 
+    # 9. Endwert-Label aus dem juengsten JA (z.B. "Steuerlicher Gewinn nach
+    # §4 Abs 3 EStG" bei EÜR, default "Jahresüberschuss"). Steuert die
+    # Beschriftung des Plausibilitaets-Ankers im Excel.
+    endwert_label = None
+    if ja_docs:
+        endwert_label = newest_ja.get("endwert_label")
+
     return {"columns": columns, "groups": groups_out, "questions": questions,
-            "pdf_jue_per_column": pdf_jue_per_column}
+            "pdf_jue_per_column": pdf_jue_per_column,
+            "endwert_label": endwert_label}
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +215,9 @@ def _build_columns(ja_docs: list[dict], bwa_docs: list[dict]) -> list[dict]:
         y = d.get("year")
         if y is None:
             continue
+        default_label = f"Susa {y}" if d.get("type") == "susa" else f"BWA {y}"
         entries.append((y, 1, {
-            "label": d.get("period_label") or f"BWA {y}",
+            "label": d.get("period_label") or default_label,
             "kind": "bwa", "year": y,
             "sign_convention": d.get("sign_convention", default_sign),
         }))
@@ -223,8 +234,11 @@ def _find_ja_for_year(ja_docs: list[dict], year: int) -> dict | None:
 
 def _find_bwa_for_col(bwa_docs: list[dict], col: dict) -> dict | None:
     for d in bwa_docs:
-        if d.get("year") == col["year"] and (d.get("period_label") or
-                                              f"BWA {d.get('year')}") == col["label"]:
+        if d.get("year") != col["year"]:
+            continue
+        default_label = (f"Susa {d.get('year')}" if d.get("type") == "susa"
+                         else f"BWA {d.get('year')}")
+        if (d.get("period_label") or default_label) == col["label"]:
             return d
     return None
 
@@ -334,8 +348,15 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
         # vertrauen den einzeln nachvollziehbaren Konto-Werten und ignorieren
         # einen Mismatch zur PDF-Summe stillschweigend.
 
-    # open_questions übertragen
+    # open_questions übertragen — Claude liefert manchmal Strings statt Dicts
+    # (z.B. "Diese PDF ist eine EÜR ohne erkennbare GuV-Gruppen").
+    # Solche Hinweise als hint-only-Eintraege behandeln, damit der Job nicht crasht.
     for oq in doc.get("open_questions", []):
+        if isinstance(oq, str):
+            questions.append({"type": "unmatched_account", "year": year,
+                              "konto_nr": None, "bezeichnung": None,
+                              "betrag_gj": None, "hint": oq})
+            continue
         questions.append({
             "type": "unmatched_account", "year": year,
             "konto_nr": oq.get("konto_nr"),

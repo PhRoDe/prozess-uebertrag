@@ -6,8 +6,17 @@ from anthropic import Anthropic, APIStatusError
 from app.config import get_settings
 from app.worker.prompts import (
     DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION,
-    BWA_PROMPT, SYSTEM_PROMPT,
+    BWA_PROMPT, SUSA_PROMPT, SYSTEM_PROMPT,
 )
+
+
+def _select_prompt(doc_type: str, vision: bool = False) -> str:
+    """Map doc_type → richtiger Extraktions-Prompt."""
+    if doc_type == "bwa":
+        return BWA_PROMPT
+    if doc_type == "susa":
+        return SUSA_PROMPT
+    return EXTRACTION_PROMPT_VISION if vision else EXTRACTION_PROMPT_TEXT
 
 
 class ExtractionError(Exception):
@@ -35,13 +44,17 @@ class ClaudeClient:
         )
         return resp.strip().lower()
 
-    def extract_text_pdf(self, text: str, is_bwa: bool = False) -> dict[str, Any]:
+    def extract_text_pdf(self, text: str, is_bwa: bool = False,
+                          doc_type: str | None = None) -> dict[str, Any]:
+        """doc_type ('jahresabschluss' | 'bwa' | 'susa') ist authoritativ
+        wenn gesetzt; is_bwa bleibt fuer Backwards-Kompatibilitaet."""
         if len(text) > self.max_extract_chars:
             raise ExtractionError(
                 f"PDF-Text zu lang ({len(text):,} Zeichen, Limit {self.max_extract_chars:,}). "
                 "Bitte kleinere PDF hochladen."
             )
-        prompt = BWA_PROMPT if is_bwa else EXTRACTION_PROMPT_TEXT
+        effective = doc_type or ("bwa" if is_bwa else "jahresabschluss")
+        prompt = _select_prompt(effective, vision=False)
         raw = self._call(
             messages=[
                 {"role": "user", "content": [
@@ -53,8 +66,10 @@ class ClaudeClient:
         )
         return self._parse_json(raw)
 
-    def extract_scan_pdf(self, pages_png: list[bytes], is_bwa: bool = False) -> dict[str, Any]:
-        prompt = BWA_PROMPT if is_bwa else EXTRACTION_PROMPT_VISION
+    def extract_scan_pdf(self, pages_png: list[bytes], is_bwa: bool = False,
+                          doc_type: str | None = None) -> dict[str, Any]:
+        effective = doc_type or ("bwa" if is_bwa else "jahresabschluss")
+        prompt = _select_prompt(effective, vision=True)
         images = [
             {"type": "image", "source": {
                 "type": "base64", "media_type": "image/png",

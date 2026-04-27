@@ -60,20 +60,20 @@ def extract_job(job_id: str) -> None:
             if kind == PdfKind.TEXT:
                 # Klassifikation auf Basis der ersten 5000 Zeichen (Titelseite)
                 doc_type = claude.classify_document(extract_text(data)[:5000])
-                is_bwa = (doc_type == "bwa")
-                if is_bwa:
-                    # BWAs sind meist kurz → kompletter Text
-                    extraction = claude.extract_text_pdf(extract_text(data), is_bwa=True)
+                if doc_type in ("bwa", "susa"):
+                    # BWA und Susa sind meist kurz → kompletter Text
+                    extraction = claude.extract_text_pdf(
+                        extract_text(data), doc_type=doc_type)
                 else:
                     # JAs koennen 60+ Seiten haben → nur GuV-Kontennachweis an Claude.
                     # Das spart Tokens und verhindert dass Claude den Fokus verliert.
                     guv_text = extract_guv_section(data)
-                    extraction = claude.extract_text_pdf(guv_text, is_bwa=False)
+                    extraction = claude.extract_text_pdf(
+                        guv_text, doc_type="jahresabschluss")
             else:
                 doc_type = claude.classify_document("SCAN-BILDDATEN")
-                is_bwa = (doc_type == "bwa")
                 pages = pdf_to_images(data)
-                extraction = claude.extract_scan_pdf(pages, is_bwa=is_bwa)
+                extraction = claude.extract_scan_pdf(pages, doc_type=doc_type)
 
             extraction["file"] = input_file.name
             extractions.append(extraction)

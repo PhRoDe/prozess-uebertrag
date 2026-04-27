@@ -459,3 +459,100 @@ def test_jue_nutzt_aggregate_wenn_keine_konten_in_spalte():
     formula = ws.cell(je_row, 3).value
     # Hier MUSS Personalkosten in der Formel sein (nichts anderes da)
     assert f"C{personalkosten_row}" in formula
+
+
+# ---------------------------------------------------------------------------
+# EÜR (§4 Abs 3 EStG) — Karstens-Pattern
+# ---------------------------------------------------------------------------
+
+def _eur_karstens_2024():
+    """Vereinfachter EÜR-Datensatz nach Karstens-Layout:
+       A. Betriebseinnahmen → ertrag
+       B. Betriebsausgaben → aufwand
+       D.1 Hinzurechnungen → ertrag (addiert sich zum Gewinn)
+       D. Kürzungen → aufwand (mindert Gewinn)
+
+    Erwartete Excel-Formel (expenses_positive):
+       Steuerlicher Gewinn = (Einnahmen + Hinzurechnungen)
+                             - (Materialausgaben + Kürzungen)
+       = (372474.75 + (543.10 + (-6832.00))) - (722.71 + 69483.50)
+       = 366185.85 - 70206.21 = 295979.64
+    """
+    cols = [{"label": "2024", "kind": "ja", "year": 2024,
+             "sign_convention": "expenses_positive"}]
+    groups = [
+        {"name": "A. 1. Einnahmen", "type": "ertrag", "sub_group_of": None,
+         "gkv_section": "umsatzerloese", "column_sums": {},
+         "accounts": [
+             {"konto_nr": "8400", "bezeichnung": "Erlöse 19% USt",
+              "values": {0: 372474.75}, "confidence": "high"},
+         ]},
+        {"name": "B. 1. Materialausgaben", "type": "aufwand",
+         "sub_group_of": None, "gkv_section": "materialaufwand_rhb",
+         "column_sums": {},
+         "accounts": [
+             {"konto_nr": "1600", "bezeichnung": "Verbindlichkeiten L+L",
+              "values": {0: 722.71}, "confidence": "high"},
+         ]},
+        {"name": "D. 1. Hinzurechnungen", "type": "ertrag",
+         "sub_group_of": None, "gkv_section": None, "column_sums": {},
+         "accounts": [
+             {"konto_nr": "4654", "bezeichnung": "Bewirtungskosten",
+              "values": {0: 543.10}, "confidence": "high"},
+             {"konto_nr": "4320", "bezeichnung": "Gewerbesteuer",
+              "values": {0: -6832.00}, "confidence": "high"},
+         ]},
+        {"name": "D. Kürzungen", "type": "aufwand",
+         "sub_group_of": None, "gkv_section": None, "column_sums": {},
+         "accounts": [
+             {"konto_nr": "9971", "bezeichnung": "IAB §7g (1) EStG",
+              "values": {0: 69483.50}, "confidence": "high"},
+         ]},
+    ]
+    return {"columns": cols, "groups": groups, "questions": [],
+            "endwert_label": "Steuerlicher Gewinn nach §4 Abs. 3 EStG"}
+
+
+def test_eur_endwert_label_in_excel():
+    """Excel-Formel-Zeile beschriftet sich mit dem EÜR-Endwert. HGB-Default
+    bleibt 'Jahresergebnis' (Backwards-Kompat)."""
+    xlsx = build_excel(_eur_karstens_2024())
+    ws = _ws(xlsx)
+    assert _find_row(ws, "Steuerlicher Gewinn nach §4 Abs. 3 EStG") is not None
+    xlsx_hgb = build_excel(_sample())
+    ws_hgb = _ws(xlsx_hgb)
+    assert _find_row(ws_hgb, "Jahresergebnis") is not None
+
+
+def test_eur_hinzurechnungen_addiert_kuerzungen_subtrahiert():
+    """Kern-Logik der EÜR: Hinzurechnungen werden im Endwert ADDIERT
+    (type=ertrag), Kürzungen SUBTRAHIERT (type=aufwand). Damit kommt bei
+    expenses_positive die richtige steuerliche Gewinn-Formel raus."""
+    xlsx = build_excel(_eur_karstens_2024())
+    ws = _ws(xlsx)
+    je_row = _find_row(ws, "Steuerlicher Gewinn nach §4 Abs. 3 EStG")
+    formula = ws.cell(je_row, 3).value
+    einnahmen_row = _find_row(ws, "A. 1. Einnahmen")
+    material_row = _find_row(ws, "B. 1. Materialausgaben")
+    hinzu_row = _find_row(ws, "D. 1. Hinzurechnungen")
+    kuerz_row = _find_row(ws, "D. Kürzungen")
+    # Einnahmen + Hinzurechnungen sind Ertrag → in Plus-Teil
+    assert f"C{einnahmen_row}+C{hinzu_row}" in formula \
+        or f"C{hinzu_row}+C{einnahmen_row}" in formula
+    # Material + Kürzungen sind Aufwand → in Minus-Teil (mit '-' Prefix)
+    assert f"-C{material_row}" in formula
+    assert f"-C{kuerz_row}" in formula
+
+
+def test_eur_pdf_anker_label_dynamisch():
+    """Wenn pdf_jue_per_column gesetzt ist, beschriftet die Anker-Zeile
+    sich mit 'PDF-{endwert_label}' (statt hartcoded 'PDF-Jahresüberschuss')."""
+    data = _eur_karstens_2024()
+    # Steuerlicher Gewinn = (372474.75 - 6288.90) - (722.71 + 69483.50)
+    #                     = 295979.64
+    data["pdf_jue_per_column"] = {0: 295979.64}
+    xlsx = build_excel(data)
+    ws = _ws(xlsx)
+    label_row = _find_row(ws, "PDF-Steuerlicher Gewinn nach §4 Abs. 3 EStG")
+    assert label_row is not None
+    assert abs(ws.cell(label_row, 3).value - 295979.64) < 0.01

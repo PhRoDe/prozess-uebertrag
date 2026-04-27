@@ -75,6 +75,36 @@ def _resolve_role(g: dict) -> str:
     return g.get("type", "neutral")
 
 
+def _endwert_groups(groups: list[dict]) -> list[dict]:
+    """Liefert die Gruppen die in die Endwert-Formel einfliessen, jeweils mit
+    ihrem eigenen type/section-Vorzeichen.
+
+    Logik:
+    - Top-Level mit eigenen accounts → Top-Level verwenden (Subs werden in
+      Pass 2 aufaddiert; bei HGB-Pattern haben die Subs den gleichen type
+      wie der Parent, also algebraisch aequivalent).
+    - Top-Level ohne accounts, aber mit Sub-Gruppen → Sub-Gruppen einzeln.
+      Wichtig fuer EÜR-Block "D. STEUERLICHE KORREKTUREN": Hinzurechnungen
+      (type=ertrag) und Kürzungen/IAB-Bildung (type=aufwand) bekommen
+      gegenteilige Vorzeichen — der Parent kann sie nicht repraesentieren.
+    - Top-Level ohne accounts und ohne Subs → bleibt drin (BWA-Aggregat,
+      direkt aus column_sums).
+    """
+    result = []
+    for g in groups:
+        if g.get("sub_group_of") is not None:
+            continue
+        if g.get("accounts"):
+            result.append(g)
+        else:
+            subs = [s for s in groups if s.get("sub_group_of") == g["name"]]
+            if subs:
+                result.extend(subs)
+            else:
+                result.append(g)
+    return result
+
+
 def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes:
     """Build the final xlsx bytes from the consolidated structure.
 
@@ -91,6 +121,14 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     pdf_jue_per_column = {int(k): v for k, v in
                            (consolidated.get("pdf_jue_per_column") or {}).items()}
     questions = list(consolidated.get("questions") or [])
+    # Endwert-Label aus der Extraktion (z.B. "Steuerlicher Gewinn nach §4 Abs 3
+    # EStG" bei EÜR). Wenn gesetzt, nutzen wir es fuer beide Endwert-Zeilen
+    # (Excel-Formel + PDF-Anker). Bei HGB-GuV ohne explicit Label bleiben die
+    # historischen Defaults "Jahresergebnis" (Formel) und "PDF-Jahresüberschuss"
+    # (Anker) — neutral genug fuer Ueberschuss UND Fehlbetrag.
+    endwert_label_explicit = consolidated.get("endwert_label")
+    formula_label = endwert_label_explicit or "Jahresergebnis"
+    pdf_anker_label = endwert_label_explicit or "Jahresüberschuss"
 
     # Sanity: if any accounts exist at all, at least one must carry a value.
     # An all-empty account set means a structural bug (typically a JSON-roundtrip
@@ -227,28 +265,32 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
     # Jahresergebnis-Zeile: Summe aller Top-Level-Gruppen (sub_group_of is None)
     # unter Berücksichtigung von Gruppen-Typ und sign_convention der jeweiligen Spalte.
+    # Bei EÜR steht hier der Endwert-Begriff der Extraktion (z.B. "Steuerlicher Gewinn").
     je_row = row_cursor
-    ws.cell(row=je_row, column=2, value="Jahresergebnis").font = BOLD
+    ws.cell(row=je_row, column=2, value=formula_label).font = BOLD
+    formula_groups = _endwert_groups(groups)
     for col_idx, col in enumerate(columns):
         target_col = 3 + col_idx
         col_letter = get_column_letter(target_col)
         conv = col.get("sign_convention", "expenses_negative")
-        # Wenn die Spalte echte Konten-Daten in Top-Level-Gruppen hat, sind
-        # reine Aggregat-Gruppen (accounts=0, nur column_sum) redundante Sichten
-        # derselben Werte (typisch BWA-Aggregate die JA-Konten zusammenfassen)
-        # → in der JÜ-Formel ueberspringen, sonst Doppelzaehlung.
+        # Wenn die Spalte echte Konten-Daten hat (egal in welcher Ebene), sind
+        # reine Aggregat-Gruppen (accounts=0, keine Subs, nur column_sum)
+        # redundante Sichten derselben Werte (typisch BWA-Aggregate die
+        # JA-Konten zusammenfassen) → ueberspringen, sonst Doppelzaehlung.
         col_has_account_data = any(
             (acc.get("values") or {}).get(col_idx) is not None
-            for g in groups if g.get("sub_group_of") is None
-            for acc in (g.get("accounts") or [])
+            for g in groups for acc in (g.get("accounts") or [])
         )
         parts_plus: list[int] = []
         parts_minus: list[int] = []
-        for g in groups:
-            if g.get("sub_group_of") is not None:
-                continue  # nur Top-Level summieren
-            if col_has_account_data and not g.get("accounts"):
-                continue  # redundante Aggregat-Gruppe — Daten stecken schon in JA-Konten
+        for g in formula_groups:
+            is_bare_top_level = (
+                g.get("sub_group_of") is None
+                and not g.get("accounts")
+                and not any(s.get("sub_group_of") == g["name"] for s in groups)
+            )
+            if col_has_account_data and is_bare_top_level:
+                continue  # redundante BWA-Aggregat-Sicht
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
                 continue
@@ -333,12 +375,12 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             c.number_format = EUR_FORMAT
             c.font = BOLD
 
-    # Plausibilitaets-Anker: PDF-JUE + Differenz-Zeile
+    # Plausibilitaets-Anker: PDF-Endwert + Differenz-Zeile
     if pdf_jue_per_column:
         row_cursor += 1
         pdf_jue_row = row_cursor
         ws.cell(row=pdf_jue_row, column=2,
-                value="PDF-Jahresüberschuss").font = BOLD_LIGHT
+                value=f"PDF-{pdf_anker_label}").font = BOLD_LIGHT
         for col_idx in range(len(columns)):
             v = pdf_jue_per_column.get(col_idx)
             c = ws.cell(row=pdf_jue_row, column=3 + col_idx, value=v)
@@ -375,8 +417,8 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
                 )
         if jue_errors:
             raise ValueError(
-                "Excel-Jahresergebnis stimmt nicht mit PDF-Jahresüberschuss überein. "
-                "Mögliche Ursachen: fehlende/falsch extrahierte Konten, "
+                f"Excel-{formula_label} stimmt nicht mit PDF-{pdf_anker_label} "
+                "überein. Mögliche Ursachen: fehlende/falsch extrahierte Konten, "
                 "Vorzeichen-Probleme, Cross-Year-Routing. Bitte PDF prüfen oder "
                 "Job neu starten.\nBetroffen:\n  - " + "\n  - ".join(jue_errors)
             )
@@ -509,37 +551,46 @@ def _compute_excel_jue_per_column(groups: list[dict],
                                     columns: list[dict]) -> dict[int, float]:
     """Berechnet die numerische JUE pro Spalte parallel zur Excel-Formel,
     damit ein Build-Zeit-Cross-Check gegen pdf_jue moeglich ist.
-    Spiegelt die Logik der JE-Formel im Hauptbuilder."""
+    Spiegelt die Logik der JE-Formel im Hauptbuilder (siehe _endwert_groups)."""
     out: dict[int, float] = {}
+    formula_groups = _endwert_groups(groups)
     for col_idx, col in enumerate(columns):
         conv = col.get("sign_convention", "expenses_negative")
         col_has_account_data = any(
             (acc.get("values") or {}).get(col_idx) is not None
-            for g in groups if g.get("sub_group_of") is None
-            for acc in (g.get("accounts") or [])
+            for g in groups for acc in (g.get("accounts") or [])
         )
         total = 0.0
-        for g in groups:
-            if g.get("sub_group_of") is not None:
-                continue
+        for g in formula_groups:
             if g.get("gkv_section") in BILANZGEWINN_SECTIONS:
                 continue
-            if col_has_account_data and not g.get("accounts"):
+            is_bare_top_level = (
+                g.get("sub_group_of") is None
+                and not g.get("accounts")
+                and not any(s.get("sub_group_of") == g["name"] for s in groups)
+            )
+            if col_has_account_data and is_bare_top_level:
                 continue
-            # Gruppen-Summe = eigene Konten + Konten aller Sub-Gruppen.
-            # Top-Level kann beides haben (zB sonst. betr. Aufw. mit
-            # direktem Forderungsverlust-Konto und Sub 'Raumkosten').
+            # Gruppen-Summe: eigene Konten + Konten der Sub-Gruppen wenn ein
+            # Top-Level mit eigenen accounts ist (HGB-Pattern). Sub-Gruppen
+            # einzeln im _endwert_groups-Output haben nur ihre eigenen Konten.
             grp_sum = 0.0
             for acc in g.get("accounts", []):
                 v = acc.get("values", {}).get(col_idx)
                 if isinstance(v, (int, float)):
                     grp_sum += v
-            for sub in groups:
-                if sub.get("sub_group_of") == g["name"]:
-                    for acc in sub.get("accounts", []):
-                        v = acc.get("values", {}).get(col_idx)
-                        if isinstance(v, (int, float)):
-                            grp_sum += v
+            if g.get("sub_group_of") is None:
+                for sub in groups:
+                    if sub.get("sub_group_of") == g["name"]:
+                        for acc in sub.get("accounts", []):
+                            v = acc.get("values", {}).get(col_idx)
+                            if isinstance(v, (int, float)):
+                                grp_sum += v
+            # BWA-Aggregat: Wert aus column_sums uebernehmen.
+            if grp_sum == 0.0 and not g.get("accounts"):
+                cs = (g.get("column_sums") or {}).get(col_idx)
+                if isinstance(cs, (int, float)):
+                    grp_sum = cs
             role = _resolve_role(g)
             if conv == "expenses_negative":
                 total += grp_sum

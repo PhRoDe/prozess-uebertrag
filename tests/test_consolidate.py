@@ -465,3 +465,140 @@ def test_bestandsveraenderung_verminderung_with_negative_value():
     # darf also nicht zu +614000 / +2398000 werden
     assert acc["values"][1] == -614000.00
     assert acc["values"][0] == -2398000.00
+
+
+# ---------------------------------------------------------------------------
+# EÜR (§4 Abs 3 EStG) — Karstens-Pattern
+# ---------------------------------------------------------------------------
+
+def test_eur_endwert_label_durchgereicht():
+    """Bei einer EÜR setzt Claude `endwert_label` (z.B. 'Steuerlicher Gewinn
+    nach §4 Abs 3 EStG'). Die Konsolidierung muss das Top-Level-Label
+    durchreichen, damit der Builder die Excel passend beschriften kann."""
+    doc = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_positive",
+        "endwert_label": "Steuerlicher Gewinn nach §4 Abs. 3 EStG",
+        "groups": [
+            _grp("A. 1. Einnahmen", "ertrag",
+                 [_acc("8400", "Erlöse 19% USt", 181038.78, 496640.77)],
+                 sub_of="A. BETRIEBSEINNAHMEN", gkv_section="umsatzerloese"),
+        ],
+        "open_questions": [],
+    }
+    r = merge_extractions([doc])
+    assert r["endwert_label"] == "Steuerlicher Gewinn nach §4 Abs. 3 EStG"
+
+
+def test_eur_hgb_default_endwert_label_none():
+    """Bei klassischem HGB-JA ohne explicit endwert_label liefert
+    consolidate.py None — der Builder fällt dann auf 'Jahresergebnis' /
+    'Jahresüberschuss' zurück (Backwards-Kompat)."""
+    doc = _ja(2024, 2023, [
+        _grp("Umsatzerlöse", "ertrag",
+             [_acc("8400", "Erlöse 19%", 1000000, 900000)]),
+    ])
+    r = merge_extractions([doc])
+    assert r["endwert_label"] is None
+
+
+def test_eur_hinzurechnungen_und_kuerzungen_als_eigene_gruppen():
+    """EÜR-spezifische Korrektur-Gruppen ohne gkv_section: die Konsolidierung
+    muss sie anhand von type + sub_group_of korrekt durchreichen."""
+    doc = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_positive",
+        "endwert_label": "Steuerlicher Gewinn nach §4 Abs. 3 EStG",
+        "groups": [
+            _grp("A. 1. Einnahmen", "ertrag",
+                 [_acc("8400", "Erlöse", 372474.75, 551721.35)],
+                 sub_of="A. BETRIEBSEINNAHMEN"),
+            _grp("B. 1. Materialausgaben", "aufwand",
+                 [_acc("1600", "Verbindlichkeiten L+L", 722.71, -722.71)],
+                 sub_of="B. BETRIEBSAUSGABEN",
+                 gkv_section="materialaufwand_rhb"),
+            _grp("D. 1. Hinzurechnungen", "ertrag",
+                 [_acc("4654", "Bewirtungskosten", 543.10, 374.24),
+                  _acc("4320", "Gewerbesteuer", -6832.00, 11660.00)],
+                 sub_of="D. STEUERLICHE KORREKTUREN"),
+            _grp("D. Kürzungen", "aufwand",
+                 [_acc("9971", "IAB §7g (1) EStG", 69483.50, 0.00)],
+                 sub_of="D. STEUERLICHE KORREKTUREN"),
+        ],
+        "open_questions": [],
+    }
+    r = merge_extractions([doc])
+    names = [g["name"] for g in r["groups"]]
+    # alle Sub-Gruppen sind drin, Parent-Sektionen wurden synthetisch eingefügt
+    assert "D. 1. Hinzurechnungen" in names
+    assert "D. Kürzungen" in names
+    assert "D. STEUERLICHE KORREKTUREN" in names  # synthetic parent
+    # type-Klassifikation bleibt erhalten — kritisch für die JÜ-Formel
+    hinzu = next(g for g in r["groups"] if g["name"] == "D. 1. Hinzurechnungen")
+    kuerz = next(g for g in r["groups"] if g["name"] == "D. Kürzungen")
+    assert hinzu["type"] == "ertrag"   # → wird im Builder addiert
+    assert kuerz["type"] == "aufwand"  # → wird im Builder subtrahiert
+
+
+# ---------------------------------------------------------------------------
+# Susa (Summen- und Saldenliste) — wird wie BWA behandelt
+# ---------------------------------------------------------------------------
+
+def test_susa_creates_bwa_like_column():
+    """Susa-Doc bekommt eine eigene Spalte (kind='bwa'), Konten landen wie
+    bei einer BWA mit Einzelkonten. Gruppen-Routing per Kontonummer in
+    bestehende JA-Gruppen, BWA-only-Gruppen werden angehaengt."""
+    ja = _ja(2024, 2023, [
+        _grp("Umsatzerlöse", "ertrag",
+             [_acc("8400", "Erlöse 19%", 1000000, 900000)]),
+    ])
+    susa = {
+        "type": "susa", "year": 2025, "period_label": "Susa Dez 2025",
+        "sign_convention": "expenses_positive",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [
+                 {"konto_nr": "8400", "bezeichnung": "Erlöse 19% USt",
+                  "betrag_gj": 491908.37, "confidence": "high"},
+             ]},
+            {"name": "Löhne und Gehälter", "type": "aufwand",
+             "gkv_section": "personalaufwand_loehne", "sub_group_of": None,
+             "accounts": [
+                 {"konto_nr": "4110", "bezeichnung": "Löhne",
+                  "betrag_gj": 556.00, "confidence": "high"},
+             ]},
+        ],
+        "open_questions": [],
+    }
+    r = merge_extractions([ja, susa])
+    # 3 Spalten: 2023 (ja), 2024 (ja), Susa Dez 2025 (bwa-kind)
+    kinds = [c["kind"] for c in r["columns"]]
+    assert kinds == ["ja", "ja", "bwa"]
+    labels = [c["label"] for c in r["columns"]]
+    assert labels[2] == "Susa Dez 2025"
+    # 8400 hat in Susa-Spalte einen Wert
+    susa_idx = 2
+    erloese = next(g for g in r["groups"] if g["name"] == "Umsatzerlöse")
+    konto_8400 = erloese["accounts"][0]
+    assert konto_8400["values"][susa_idx] == 491908.37
+    # Löhne-Gruppe wurde als neue BWA-only-Gruppe angehaengt
+    loehne = next(g for g in r["groups"] if g["name"] == "Löhne und Gehälter")
+    assert loehne["accounts"][0]["values"][susa_idx] == 556.00
+
+
+def test_susa_default_label_when_period_label_missing():
+    """Wenn Claude period_label vergisst, fällt das Spalten-Label auf
+    'Susa {year}' zurück (NICHT 'BWA {year}' — das wäre verwirrend)."""
+    susa = {
+        "type": "susa", "year": 2025, "sign_convention": "expenses_positive",
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 100.0, "confidence": "high"}]},
+        ],
+        "open_questions": [],
+    }
+    r = merge_extractions([susa])
+    assert r["columns"][0]["label"] == "Susa 2025"

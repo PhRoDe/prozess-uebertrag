@@ -1,6 +1,6 @@
 from app.worker.prompts import (
     DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION,
-    BWA_PROMPT, SYSTEM_PROMPT,
+    BWA_PROMPT, SUSA_PROMPT, SYSTEM_PROMPT,
 )
 
 
@@ -50,12 +50,48 @@ def test_extraction_prompt_requires_pdf_jahresueberschuss():
 
 
 def test_extraction_prompt_requires_gkv_section():
-    """Jede Gruppe muss in eine GKV-Sektion (HGB §275 GKV) klassifiziert
-    werden, damit der Builder eine stabile, STB-unabhaengige Reihenfolge
-    erzwingen kann."""
+    """gkv_section ist optional aber im Prompt dokumentiert, damit der Builder
+    HGB-§275-Slugs als STB-unabhaengigen Anker erzwingen kann."""
     assert "gkv_section" in EXTRACTION_PROMPT_TEXT
-    # Wichtigste Sektionen muessen im Prompt stehen
     for slug in ("umsatzerloese", "materialaufwand_rhb",
                  "personalaufwand_loehne", "abschreibungen",
                  "sonst_betr_aufw", "ee_steuern", "sonst_steuern"):
         assert slug in EXTRACTION_PROMPT_TEXT, f"Missing slug: {slug}"
+
+
+def test_doc_type_prompt_includes_susa():
+    """Susa als eigene Kategorie — sonst landet sie im 'unknown' und der
+    Extraktor weiss nicht welchen Prompt er nehmen soll."""
+    assert "susa" in DOC_TYPE_PROMPT.lower()
+    assert "Summen und Salden" in DOC_TYPE_PROMPT
+
+
+def test_susa_prompt_excludes_bilanz_klassen():
+    """Susa-Prompt muss explizit Klassen 0/1/9 ausschliessen — sonst landen
+    Bilanz-Konten (Pkw, Bank, Privatentnahmen) in der GuV-Excel."""
+    assert "Klasse 0" in SUSA_PROMPT
+    assert "Klasse 1" in SUSA_PROMPT
+    assert "Klasse 9" in SUSA_PROMPT
+    assert "ignoriert" in SUSA_PROMPT.lower() or "ignorieren" in SUSA_PROMPT.lower()
+    # Ausgabe-Format: pdf_jahresueberschuss optional/null (Susa hat keinen Endwert)
+    assert "pdf_jahresueberschuss_gj" in SUSA_PROMPT  # Feld erwähnt
+    # type=susa als Output-Marker
+    assert '"type": "susa"' in SUSA_PROMPT
+
+
+def test_extraction_prompt_supports_eur_format():
+    """Der Prompt muss explizit EÜR-Format (§4 Abs 3 EStG) abdecken — sonst
+    bricht Claude bei Einzelunternehmer-PDFs ab oder liefert leeres JSON."""
+    # Format-Hinweis im Prompt
+    assert "§4 Abs. 3 EStG" in EXTRACTION_PROMPT_TEXT \
+        or "§ 4 Abs. 3 EStG" in EXTRACTION_PROMPT_TEXT
+    assert "Einnahmen-Überschuss" in EXTRACTION_PROMPT_TEXT \
+        or "EÜR" in EXTRACTION_PROMPT_TEXT
+    # Stop-Position-Logik fuer EÜR (Steuerlicher Gewinn statt Jahresüberschuss)
+    assert "Steuerlicher Gewinn" in EXTRACTION_PROMPT_TEXT
+    # Hinzurechnungen + Kürzungen müssen klassifiziert werden
+    # (Hinzurechnungen=ertrag, Kürzungen=aufwand)
+    assert "Hinzurechnungen" in EXTRACTION_PROMPT_TEXT
+    assert "Kürzungen" in EXTRACTION_PROMPT_TEXT
+    # endwert_label-Feld fuer dynamische Excel-Beschriftung
+    assert "endwert_label" in EXTRACTION_PROMPT_TEXT
