@@ -1,8 +1,15 @@
 # Prozess-Übertrag
 
-Interne Calandi-Web-App. Jahresabschluss- und BWA-PDFs per Drag-and-Drop hochladen,
-Claude extrahiert den Kontennachweis der GuV, Output ist eine Excel die die
-**Gliederung der Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
+Interne Calandi-Web-App. JA-, BWA- und Susa-PDFs per Drag-and-Drop hochladen,
+Claude extrahiert die Konten, Output ist eine Excel die die **Gliederung der
+Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
+
+**Unterstützte Formate (seit 2026-04-27):**
+- **HGB-GuV §275** (Kapitalgesellschaften)
+- **EÜR §4 Abs 3 EStG** (Einzelunternehmer/Freiberufler) inkl.
+  Hinzurechnungen + Kürzungen → Steuerlicher Gewinn
+- **BWA** (kurz oder detailliert mit Konten)
+- **Susa** (DATEV-Roh-Saldenliste, Klassen 2-8; Bilanz/Saldenvorträge raus)
 
 ## Wo es läuft
 
@@ -74,8 +81,8 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
 
 | Datei | Zweck |
 |---|---|
-| `app/worker/prompts.py` | Extraktions-Prompts für Claude — Quelle der Wahrheit für "wie soll das JSON aussehen" |
-| `app/worker/claude_client.py` | anthropic SDK Wrapper mit 429-Retry + `<pdf_content>`-Delimiter |
+| `app/worker/prompts.py` | Extraktions-Prompts für Claude (HGB-GuV+EÜR / BWA / Susa) — Quelle der Wahrheit für "wie soll das JSON aussehen" |
+| `app/worker/claude_client.py` | anthropic SDK Wrapper, doc_type-aware (`extract_text_pdf(doc_type=...)`), 429-Retry, `<pdf_content>`-Delimiter |
 | `app/worker/consolidate.py` | Multi-Jahr-Merging, Spalten-Bau (JA+BWA getrennt), Vorjahres-Cross-Check |
 | `app/excel/builder.py` | Dynamisches Layout, Summe-zuerst, sign-aware Jahresergebnis |
 | `app/routes/pages.py` | Login, Home, Logout |
@@ -108,10 +115,21 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
   Speichern in Postgres JSONB zu Strings. `_coerce_int_keys` im Builder casted
   sie beim Eintreten zurück. Niemals direkt mit int auf das Dict zugreifen
   ohne vorher zu coercen.
-- **Build-Time-Plausibilitäts-Anker**: Excel-JÜ ↔ PDF-JÜ wird centgenau
-  geprüft. Diff > 1 ct → `ValueError` aus `build_excel`, Job geht auf
-  FAILED. Kein silently fehlerhaftes Excel wird ausgeliefert. Das fängt
-  systemische Bugs (Cross-Year-Routing, Vorzeichen, Doppelzählung) hart ab.
+- **Build-Time-Plausibilitäts-Anker**: Excel-Endwert ↔ PDF-Endwert wird
+  centgenau geprüft. Diff > 1 ct → `ValueError` aus `build_excel`, Job geht
+  auf FAILED. Endwert-Begriff ist dynamisch via `endwert_label`
+  ("Jahresüberschuss" bei HGB / "Steuerlicher Gewinn nach §4 Abs 3 EStG"
+  bei EÜR). Bei Susa kein Cross-Check (kein Endwert in der Susa).
+- **EÜR Hinzurechnungen + Kürzungen**: Hinzurechnungen → `type="ertrag"`
+  (addiert), Kürzungen → `type="aufwand"` (subtrahiert). Mit
+  `expenses_positive` ergibt das den korrekten Steuerlichen Gewinn.
+  Im Builder iteriert `_endwert_groups()` bei Top-Level-Gruppen ohne
+  eigene accounts (= synthetic Parent wie "D. STEUERLICHE KORREKTUREN")
+  auf Sub-Group-Ebene, weil mixed-type Subs nicht durch einen Parent-
+  Wrapper repräsentiert werden können.
+- **Susa-Filterung**: Klassen 0/1/9 (Bilanz, Saldenvorträge) werden in
+  `SUSA_PROMPT` explizit ausgeschlossen — sonst landen Pkw, Bank,
+  Privatentnahmen in der GuV-Excel.
 - **BWA-Aggregat-Doppelzählung verhindert**: BWA-Aggregat-Gruppen ohne
   eigene Konten (Personalkosten, Raumkosten etc., die JA-Gruppen
   zusammenfassen) werden in der JÜ-Formel übersprungen wenn die Spalte

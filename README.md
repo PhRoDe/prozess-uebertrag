@@ -1,24 +1,41 @@
 # Prozess-Übertrag
 
-Interne Calandi-Web-App: Jahresabschluss- und BWA-PDFs per Drag-and-Drop
-hochladen, Claude extrahiert den Kontennachweis der GuV, Output ist eine Excel
-die die Gliederung der Original-PDF 1:1 übernimmt.
+Interne Calandi-Web-App: Jahresabschluss-, BWA- und Susa-PDFs per
+Drag-and-Drop hochladen, Claude extrahiert die Konten, Output ist eine
+Excel die die Gliederung der Original-PDF 1:1 übernimmt.
 
 **Live:** https://prozess-uebertrag-production.up.railway.app
 
 Siehe `CLAUDE.md` für die Entwickler-Perspektive,
 `docs/specs/2026-04-23-prozess-uebertrag-design.md` für das Design.
 
+## Unterstützte Eingangsformate
+
+- **HGB-GuV nach §275** (Kapitalgesellschaften) mit Kontennachweis,
+  Endwert = Jahresüberschuss/Jahresfehlbetrag
+- **EÜR nach §4 Abs 3 EStG** (Einzelunternehmer/Freiberufler) mit
+  Hinzurechnungen + Kürzungen, Endwert = Steuerlicher Gewinn
+- **BWA** (Betriebswirtschaftliche Auswertung) — kurz/Hauptpositionen oder
+  detailliert mit Einzelkonten
+- **Susa** (Summen- und Saldenliste / DATEV-Roh-Auszug) — Konten der
+  Klassen 2-8; Klasse 0/1/9 (Bilanz, Saldenvorträge) werden ausgeschlossen
+
+Mehrere Dokumente lassen sich kombinieren (z.B. JA 2023 + JA 2024 + BWA 2025
++ Susa Dez 2025) — wird automatisch zu einer Excel mit einer Spalte pro
+Periode konsolidiert (Cross-Year-Matching via Kontonummer).
+
 ## Features
 
-- Upload von Jahresabschluss-PDFs (Text oder Scan) und BWAs
-- Automatische Typerkennung (JA vs. BWA) via Claude
+- Upload von PDFs (Text oder Scan)
+- Automatische Typerkennung (jahresabschluss / bwa / susa) via Claude
 - Extraktion pro PDF, Multi-Jahres-Konsolidierung mit Cross-Check
 - **Excel übernimmt die PDF-Gliederung** + GKV-Sektion-Klassifikation (§275 HGB)
   als STB-unabhängiger Anker für Multi-Jahr-Matching
-- **Plausibilitäts-Anker mit hartem Fail:** Excel-JÜ wird centgenau gegen
-  PDF-Jahresüberschuss verglichen. Diff > 1 ct → Job FAILT, kein silently
-  fehlerhaftes Excel wird ausgeliefert
+- **Plausibilitäts-Anker mit hartem Fail:** Excel-Endwert wird centgenau
+  gegen den PDF-Endwert verglichen (Jahresüberschuss bei HGB-GuV /
+  Steuerlicher Gewinn bei EÜR). Diff > 1 ct → Job FAILT, kein silently
+  fehlerhaftes Excel wird ausgeliefert. Bei Susa kein Cross-Check
+  (kein Endwert in der Susa selbst)
 - **Bestandsveränderung universal**: Erhöhung/Verminderung-Position wird per
   Name normalisiert (`+|wert|` für Erhöhung, `-|wert|` für Verminderung) —
   egal welche STB-Vorzeichen-Konvention das PDF nutzt
@@ -167,8 +184,19 @@ railway up
 - Excel-Logik lebt in `app/excel/`, KEINE Netzwerk-Calls dort.
 - **Alle Excel-Zwischensummen MÜSSEN Formeln sein** (`=SUM(...)`), nie hardcoded.
 - **Keine HGB-Normalisierung der Reihenfolge**: Wenn eine PDF "Raumkosten" als
-  Hauptgruppe zeigt, bleibt das so. Aber `gkv_section`-Slug pro Gruppe ist
-  Pflicht (semantischer Anker für JÜ-Formel + Cross-Year-Matching).
+  Hauptgruppe zeigt, bleibt das so. `gkv_section`-Slug ist optional —
+  bei HGB-Positionen vergeben (semantischer Anker für JÜ-Formel +
+  Cross-Year-Matching), bei EÜR-spezifischen Positionen (Privatanteile,
+  IAB, Hinzurechnungen, Kürzungen) `null` setzen.
+- **EÜR-Korrekturen**: Hinzurechnungen → `type="ertrag"` (werden zum
+  Steuerlichen Gewinn addiert), Kürzungen → `type="aufwand"` (werden
+  subtrahiert). Mit `expenses_positive` ergibt das die korrekte
+  Steuer-Gewinn-Formel.
+- **Synthetische Parent-Gruppen mit gemischten Sub-Types** (typisch EÜR
+  "D. STEUERLICHE KORREKTUREN" mit Hinzurechnungen=ertrag +
+  Kürzungen=aufwand) werden in der Endwert-Formel **auf Sub-Group-Ebene**
+  iteriert, NICHT als Parent-Block. Der Parent-Wrapper kann mixed-type
+  Subs nicht repräsentieren.
 - Claude übernimmt Vorzeichen **1:1 aus der PDF**. Die `sign_convention` wird
   im Builder aus den Daten abgeleitet, nicht blind aus Claude übernommen.
 - `pdf_jahresueberschuss_gj/_vj` ist Pflicht — Builder vergleicht Excel-JÜ
