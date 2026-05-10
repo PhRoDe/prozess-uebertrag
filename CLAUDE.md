@@ -21,10 +21,70 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
 | Supabase | Projekt `prozess-uebertrag` (Frankfurt) |
 | Team-Passwort | siehe `TEAM_CREDENTIALS.local.md` (gitignored) |
 
+## Erstes Setup (neue Sessions / Team-Mitglieder)
+
+```bash
+git clone https://github.com/PhRoDe/prozess-uebertrag.git
+cd prozess-uebertrag
+python3.12 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+cp .env.example .env
+# → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY + SESSION_SECRET
+#   eintragen (Werte in 1Password "Calandi/Prozess-Uebertrag")
+# → TEAM_CREDENTIALS.local.md aus 1Password ziehen (gitignored, enthält
+#   das Passwort fürs Login der Live-App)
+.venv/bin/pytest                                  # 106 Tests müssen grün sein
+.venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
+```
+
+Voraussetzungen: Python 3.12+, Railway-CLI nur fürs Deployen (`brew install railway`).
+
 ## Architektur in einem Satz
 
 FastAPI-Monolith auf Railway, HTMX-UI mit Tailwind-CDN, Claude-API für PDF-Extraktion,
 Supabase für Storage+Postgres, alles in einem Python-Container.
+
+### Datenfluss
+
+```
+                      Browser (HTMX)
+                            │ Drag-and-Drop PDFs
+                            ▼
+   ┌─────────────────────────────────────────────────┐
+   │  app/routes/upload.py  · Auth · Rate-Limit       │
+   │  app/routes/job.py     · Status-Polling          │
+   └─────────────────────────────────────────────────┘
+                            │ jobs.row + storage.upload
+                            ▼
+                  Supabase (Postgres + Storage)
+                            │
+                            │ Worker claimt Job (Idempotent)
+                            ▼
+   ┌─────────────────────────────────────────────────┐
+   │  app/worker/tasks.py   · Background-Orchestrator │
+   │      │                                            │
+   │      ├─► claude_client.py  · doc_type-aware      │
+   │      │       (jahresabschluss / bwa / susa)       │
+   │      │       prompts.py    · JSON-Schema           │
+   │      │                                            │
+   │      ├─► consolidate.py    · Multi-Jahr-Merge    │
+   │      │       · Vorzeichen-Normalisierung          │
+   │      │       · Cross-Year-Routing                  │
+   │      │                                            │
+   │      └─► excel/builder.py  · Layout + Formeln    │
+   │              · Build-Time-Cross-Check (Excel-JÜ   │
+   │                ↔ PDF-JÜ centgenau, sonst FAIL)    │
+   └─────────────────────────────────────────────────┘
+                            │ xlsx-Bytes
+                            ▼
+                  Supabase Storage
+                            │
+                            ▼
+                      Browser-Download
+```
+
+Pipeline-Hinweise: Worker ist idempotent + Claim-basiert (kein Doppel-Run). Cross-Check
+am Ende von `build_excel` ist Fail-Loud — kein silent kaputtes Excel wird ausgeliefert.
 
 ## Kern-Prinzip: PDF-Struktur + GKV-Anker
 
@@ -208,19 +268,49 @@ railway up
    und mit der PDF querprüfen
 4. Commit + Deploy
 
-## Bekannte Grenzen und Follow-ups
+### Bug-Report empfangen ("Spalte X sieht falsch aus")
+
+Aus 5+2 Iterationen (April/Mai 2026) destillierter Standardablauf — verhindert
+Hypothesen-vor-Daten-Iterationen (siehe `~/.claude/rules/pipeline-engineering.md`
+Regel 5):
+
+1. **Daten ziehen** — User um die problematische Excel + die zugehörigen PDFs
+   bitten. Ohne echte Daten nicht raten.
+2. **Symptom in der Excel präzise dokumentieren** — welcher Konto-Wert weicht
+   in welcher Spalte ab, was sagt das PDF dazu (im Originalformat). Tabelle
+   pro betroffene Konten/Spalten.
+3. **Eine konkrete Zahl manuell durch die Pipeline tracen** — PDF-Wert →
+   Claude-JSON → consolidated → Excel-Zelle. Wo entsteht die Abweichung?
+   Tipp: `tests/fixtures/smoketest_e2e.py` mit den realen PDFs laufen lassen
+   und `debug_extractions.json` + `debug_consolidated.json` schreiben.
+4. **Failing-Test schreiben (TDD)** — vor dem Fix einen Test in
+   `tests/test_consolidate.py` oder `tests/test_excel_builder.py`, der den
+   Bug reproduziert. Test rot machen, dann fixen, dann grün.
+5. **Live-Smoketest mit ALLEN relevanten PDFs** — nicht nur dem
+   problematischen Jahr. Multi-Jahr-Konstellationen können neue Bugs
+   triggern (siehe Tasteone-Synthetic-Parent-Bug 2026-05).
+6. **Commit + Deploy**: `git push && railway up`. Build-Logs checken
+   (`railway logs --build`).
+
+> [!warning]
+> NIE Code anfassen bevor man die echten Roh-Daten gesehen hat. Jede
+> Hypothese-vor-Daten-Iteration kostet einen User-Roundtrip.
+
+## Offene Punkte (TODO)
 
 - **Supabase-Service-Key wurde nicht rotiert** (siehe Chat-Historie vom
   2026-04-24 — Railway-Variables-Leak). **Vor dem ersten echten Deal-Upload
   rotieren.**
 - **Rate-Limit ist In-Memory per Container** — bei Railway-Multi-Replica
   funktioniert das nicht mehr. Aktuell OK weil single-replica.
-- **Review-Screen** triggered nur wenn Claude echte `open_questions` liefert.
-  Nach dem Umbau (PDF-Gliederung 1:1) passiert das selten. Wenn ein
-  exotisches PDF reinkommt das Claude nicht einordnet → Review-UI zeigt alle
-  Gruppen aus der konsolidierten Struktur als Dropdown.
-- **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
-  Nicht blockieren bei großen Scan-Deals, aber User warnen.
+- **Phase 3 (festes GKV-Layout in §275-Reihenfolge)**: nicht umgesetzt, weil
+  bei DATEV-Standard ohnehin die PDF-Reihenfolge der GKV-Reihenfolge
+  entspricht. Bei exotischen STBs könnte ein erzwungenes GKV-Layout später
+  helfen. Tracking via gkv_section ist schon drin, würde nur den Builder
+  erweitern.
+
+## Edge-Case-Verhalten (dokumentiert, kein Bug)
+
 - **STB-Vorzeichen-Inversionen in VJ-Spalten**: STBs drucken VJ-Konten oft mit
   umgekehrtem Vorzeichen vs. der eigenen Spalte des entsprechenden Jahres.
   Mit der aktuellen Logik ist der **Eigenjahres-Wert authoritativ** —
@@ -228,21 +318,24 @@ railway up
   stillschweigend aufgelöst. Praxis: Wenn ein Jahr **nur** als VJ vorliegt
   (kein eigenes JA hochgeladen), kann das Vorzeichen für dieses Jahr
   falsch sein. Einziger Workaround: das fehlende JA hochladen.
-- **Phase 3 (festes GKV-Layout in §275-Reihenfolge)**: nicht umgesetzt, weil
-  bei DATEV-Standard ohnehin die PDF-Reihenfolge der GKV-Reihenfolge
-  entspricht. Bei exotischen STBs könnte ein erzwungenes GKV-Layout später
-  helfen. Tracking via gkv_section ist schon drin, würde nur den Builder
-  erweitern.
-- **Tasteone-Sign-Bug (2026-05-10, gefixt)**: User meldete invertierte
-  2022er Spalte (Aufwand negativ, Skonti positiv) bei sonst korrekten
-  Jahren. Root Cause: Claude-Halluzination, vermutlich getriggert durch
-  Suffix-Minus an "Übertrag"-Zwischensummen mehrseitiger Tabellen.
-  Sekundärer Bug: Doppelzählung wenn ältere JAs flache Hierarchie
-  liefern und neuere Docs hierarchisch (Synthetic-Parent gewann via
-  Section-Routing gegen reale Sub). Beide Fixes (Sign-Outlier-
-  Normalisierung + Synthetic-Parent-De-Priorisierung) live ab Commit
-  `6fce589`. Voller 5-JA-Smoketest (2020-2024) am 2026-05-10 verifiziert
-  centgenaue JÜ-Übereinstimmung über alle 6 Spalten.
+- **Spalten-Inversion durch Claude-Halluzination** (Tasteone-Bug 2026-05,
+  gefixt): Wenn Claude eine ganze Spalte vorzeichen-spiegelt (Trigger:
+  Suffix-Minus an Übertrags-Zwischensummen mehrseitiger Tabellen), wird
+  das via Mehrheits-Vote über die anderen Spalten erkannt und automatisch
+  invertiert (`_normalize_column_signs`). Greift nur bei klarer Mehrheit
+  (>50%, ≥2 Spalten Konsens) — bei nur 1-2 PDFs in Summe nicht.
+- **Hierarchie-Mix zwischen Jahren** (Tasteone-Bug 2026-05, gefixt): Wenn
+  Claude die selbe Domain-Gruppe mal flach ("Aufwendungen für RHB") und
+  mal hierarchisch ("4. a) Aufwendungen für RHB" unter "4. Materialaufwand")
+  liefert, gewinnt die reale Sub gegen den synthetisch ergänzten Parent
+  beim Section-Routing — keine Doppelzählung mehr (`_build_section_to_tpl`
+  Rang 0 > 1 > 2: real-Top > Sub > synthetic-Top).
+- **Review-Screen** triggert nur wenn Claude echte `open_questions` liefert.
+  Nach dem Umbau (PDF-Gliederung 1:1) passiert das selten. Wenn ein
+  exotisches PDF reinkommt das Claude nicht einordnet → Review-UI zeigt alle
+  Gruppen aus der konsolidierten Struktur als Dropdown.
+- **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
+  Nicht blockieren bei großen Scan-Deals, aber User warnen.
 
 ## Test-Suite
 
