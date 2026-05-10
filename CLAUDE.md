@@ -135,6 +135,27 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
   zusammenfassen) werden in der JÜ-Formel übersprungen wenn die Spalte
   bereits Konten-Daten in JA-Top-Level-Gruppen hat. Heuristik in
   `build_excel`: `col_has_account_data and not g.get("accounts")` → skip.
+- **Sign-Outlier-Normalisierung pro Spalte** (`_normalize_column_signs`
+  in `consolidate.py`, seit 2026-05-10): Wenn Claude für **eine einzelne
+  Spalte** die Vorzeichen-Konvention invertiert (alle Aufwand-Konten
+  negativ statt positiv, alle Skonti positiv statt negativ — komplette
+  Spalten-Spiegelung), wird das per Mehrheits-Vote über die anderen
+  Spalten erkannt und stillschweigend korrigiert (Werte ×−1). JÜ bleibt
+  mathematisch korrekt, visuelle Konsistenz hergestellt. Greift nur bei
+  klarer Mehrheit (>50%, ≥2 Spalten Konsens). Auslöser-Pattern: Suffix-
+  Minus an "Übertrag"-Zwischensummen mehrseitiger Tabellen verleitet
+  Claude zur Spalten-Inversion (Tasteone-2022-Bug).
+- **Synthetic-Parent darf bei Section-Routing nicht gegen Subs gewinnen**
+  (`_build_section_to_tpl` in `consolidate.py`, seit 2026-05-10): Wenn
+  ältere JAs flach geliefert werden ("Aufwendungen für RHB" als Top-
+  Level) und das Template-Doc hierarchisch ("4. a) Aufwendungen für RHB"
+  unter "4. Materialaufwand"), wird der Parent von `_insert_missing_parents`
+  synthetisch erzeugt. Beim Section-basierten Routing ältere Konten:
+  Sub > synthetic Top, sonst Doppelzählung weil neuere Docs die Sub
+  exact-name treffen und ältere via Section in den synthetic Parent
+  laufen. Marker `_synthetic_parent=True` wird in `_insert_missing_parents`
+  gesetzt und in `_build_section_to_tpl` (Rang 2 = niedrigste Priorität)
+  ausgewertet.
 - **Stille Auflösung von Audit-Mismatches**:
   - `previous_year_mismatch`: Eigenjahres-Wert ist authoritativ (`setdefault`
     schreibt VJ-Wert nur wenn Spalte leer). Kein Fragen-Sheet-Eintrag.
@@ -212,11 +233,21 @@ railway up
   entspricht. Bei exotischen STBs könnte ein erzwungenes GKV-Layout später
   helfen. Tracking via gkv_section ist schon drin, würde nur den Builder
   erweitern.
+- **Tasteone-Sign-Bug (2026-05-10, gefixt)**: User meldete invertierte
+  2022er Spalte (Aufwand negativ, Skonti positiv) bei sonst korrekten
+  Jahren. Root Cause: Claude-Halluzination, vermutlich getriggert durch
+  Suffix-Minus an "Übertrag"-Zwischensummen mehrseitiger Tabellen.
+  Sekundärer Bug: Doppelzählung wenn ältere JAs flache Hierarchie
+  liefern und neuere Docs hierarchisch (Synthetic-Parent gewann via
+  Section-Routing gegen reale Sub). Beide Fixes (Sign-Outlier-
+  Normalisierung + Synthetic-Parent-De-Priorisierung) live ab Commit
+  `6fce589`. Voller 5-JA-Smoketest (2020-2024) am 2026-05-10 verifiziert
+  centgenaue JÜ-Übereinstimmung über alle 6 Spalten.
 
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # ~66 Tests
+.venv/bin/pytest                      # 106 Tests (Stand 2026-05-10)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 
