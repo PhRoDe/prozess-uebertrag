@@ -587,6 +587,132 @@ def test_susa_creates_bwa_like_column():
     assert loehne["accounts"][0]["values"][susa_idx] == 556.00
 
 
+def test_flat_old_ja_routes_into_sub_when_template_is_nested():
+    """Tasteone-Bug-2 2026-05: Aeltere JAs liefern flache Hierarchie ('Aufwen-
+    dungen für RHB' als Top-Level), juengstes JA liefert hierarchisch ('4. a)
+    Aufwendungen für RHB' als Sub von '4. Materialaufwand'). Beim Template-
+    Aufbau wird '4. Materialaufwand' als Top-Level synthetisch ergaenzt.
+
+    Erwartung: Konten der flachen JAs landen in der realen Sub, NICHT im
+    synthetischen Parent — sonst gibt es Doppelzaehlung wenn eine JA im
+    Eigenjahr die Sub und im VJ ebenfalls die Sub bedient (Werte landen
+    dann zusaetzlich auch im Parent via section-Match).
+    """
+    # 2020 (alt, flach): "Aufwendungen für RHB" als Top-Level
+    doc_2020 = _ja(2020, 2019, [
+        _grp("Umsatzerlöse", "ertrag",
+             [_acc("8400", "Erlöse", 5_000_000, 4_000_000)],
+             gkv_section="umsatzerloese"),
+        _grp("Aufwendungen für RHB", "aufwand",
+             [_acc("5400", "Wareneingang", 3_000_000, 2_500_000)],
+             gkv_section="materialaufwand_rhb"),
+    ])
+    # 2022 (neuestes, hierarchisch): "4. a) ..." als Sub von "4. Materialaufwand"
+    doc_2022 = _ja(2022, 2021, [
+        _grp("Umsatzerlöse", "ertrag",
+             [_acc("8400", "Erlöse", 5_500_000, 5_200_000)],
+             gkv_section="umsatzerloese"),
+        _grp("4. a) Aufwendungen für RHB", "aufwand",
+             [_acc("5400", "Wareneingang", 3_300_000, 3_100_000)],
+             gkv_section="materialaufwand_rhb",
+             sub_of="4. Materialaufwand"),
+    ])
+    r = merge_extractions([doc_2020, doc_2022])
+
+    # Konten landen in der realen Sub-Group, NICHT im synthetic Parent
+    parent = next((g for g in r["groups"] if g["name"] == "4. Materialaufwand"), None)
+    sub = next((g for g in r["groups"]
+                 if g["name"] == "4. a) Aufwendungen für RHB"), None)
+    assert parent is not None and sub is not None
+
+    # Der synthetic Parent darf KEINE eigenen Konten haben
+    assert len(parent.get("accounts", [])) == 0, \
+        f"Parent '4. Materialaufwand' sollte synthetisch leer sein, hat aber " \
+        f"{len(parent['accounts'])} Konten"
+
+    # Sub hat alle Wareneingang-Werte aus beiden JAs (2020, 2021 als VJ aus 2022, 2022)
+    waren = next((a for a in sub["accounts"] if a["konto_nr"] == "5400"), None)
+    assert waren is not None, "Wareneingang-Konto sollte in Sub sein"
+    cols = r["columns"]
+    col_2020 = next(i for i, c in enumerate(cols) if c["year"] == 2020)
+    col_2022 = next(i for i, c in enumerate(cols) if c["year"] == 2022)
+    assert waren["values"][col_2020] == 3_000_000
+    assert waren["values"][col_2022] == 3_300_000
+
+
+def test_outlier_column_with_inverted_signs_is_normalized():
+    """Tasteone-Bug 2026-05: Claude hat fuer 2022 die ganze Spalte vorzeichen-
+    invertiert extrahiert (Aufwand negativ statt positiv, Skonti positiv statt
+    negativ). Andere Jahre (2020, 2021, 2023, 2024) sind korrekt mit positivem
+    Aufwand-Vorzeichen.
+
+    Erwartung: Outlier-Spalte wird beim Konsolidieren erkannt (Mehrheits-Vote)
+    und die Werte werden invertiert. Resultat: alle Spalten haben einheitlich
+    positiv-konventionierten Aufwand. Die JÜ-Mathematik bleibt korrekt, weil
+    der Builder die sign_convention aus den normalisierten Werten ableitet.
+    """
+    docs = []
+    for year in (2020, 2021, 2023, 2024):
+        docs.append(_ja(year, year - 1, [
+            _grp("Umsatzerlöse", "ertrag",
+                 [_acc("8400", "Erlöse", 5_000_000, 4_000_000)],
+                 gkv_section="umsatzerloese"),
+            _grp("Materialaufwand", "aufwand",
+                 [_acc("5400", "Wareneingang", 3_000_000, 2_500_000),
+                  _acc("5736", "Skonti", -50_000, -45_000)],
+                 gkv_section="materialaufwand_rhb"),
+        ]))
+    # 2022: alle Vorzeichen invertiert (Wareneingang negativ, Skonti positiv)
+    docs.append(_ja(2022, 2021, [
+        _grp("Umsatzerlöse", "ertrag",
+             [_acc("8400", "Erlöse", 5_500_000, 5_000_000)],
+             gkv_section="umsatzerloese"),
+        _grp("Materialaufwand", "aufwand",
+             [_acc("5400", "Wareneingang", -3_200_000, -3_000_000),
+              _acc("5736", "Skonti", 60_000, 50_000)],
+             gkv_section="materialaufwand_rhb"),
+    ]))
+    r = merge_extractions(docs)
+
+    # Spalte 2022 finden
+    cols = r["columns"]
+    col_2022 = next(i for i, c in enumerate(cols) if c["year"] == 2022)
+    materialaufwand = next(g for g in r["groups"] if g["name"] == "Materialaufwand")
+    waren = next(a for a in materialaufwand["accounts"] if a["konto_nr"] == "5400")
+    skonti = next(a for a in materialaufwand["accounts"] if a["konto_nr"] == "5736")
+    # Nach Normalisierung: 2022er Werte invertiert auf Mehrheits-Konvention
+    assert waren["values"][col_2022] == 3_200_000, \
+        f"Wareneingang 2022 sollte +3.2M sein, ist {waren['values'][col_2022]}"
+    assert skonti["values"][col_2022] == -60_000, \
+        f"Skonti 2022 sollte -60k sein, ist {skonti['values'][col_2022]}"
+
+
+def test_no_normalization_when_majority_unclear():
+    """Wenn nur 2 Spalten existieren und beide unterschiedlich konventioniert
+    sind, gibt es keine Mehrheit → keine Inversion (Status quo)."""
+    docs = [
+        _ja(2024, 2023, [
+            _grp("Materialaufwand", "aufwand",
+                 [_acc("5400", "Wareneingang", 1_000_000, None)],
+                 gkv_section="materialaufwand_rhb"),
+        ]),
+        _ja(2025, 2024, [
+            _grp("Materialaufwand", "aufwand",
+                 [_acc("5400", "Wareneingang", -1_100_000, None)],
+                 gkv_section="materialaufwand_rhb"),
+        ]),
+    ]
+    r = merge_extractions(docs)
+    cols = r["columns"]
+    col_2024 = next(i for i, c in enumerate(cols) if c["year"] == 2024)
+    col_2025 = next(i for i, c in enumerate(cols) if c["year"] == 2025)
+    materialaufwand = next(g for g in r["groups"] if g["name"] == "Materialaufwand")
+    waren = next(a for a in materialaufwand["accounts"] if a["konto_nr"] == "5400")
+    # Werte unverändert (keine Mehrheit)
+    assert waren["values"][col_2024] == 1_000_000
+    assert waren["values"][col_2025] == -1_100_000
+
+
 def test_susa_default_label_when_period_label_missing():
     """Wenn Claude period_label vergisst, fällt das Spalten-Label auf
     'Susa {year}' zurück (NICHT 'BWA {year}' — das wäre verwirrend)."""

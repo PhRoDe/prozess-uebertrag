@@ -121,6 +121,7 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
             "type": g["type"],
             "sub_group_of": g["sub_group_of"],
             "gkv_section": g.get("gkv_section", "neutral"),
+            "_synthetic_parent": g.get("_synthetic_parent", False),
             "column_sums": {},
             "accounts_by_key": {},  # key -> account-dict; später zu list konvertiert
             "account_order": [],  # stabile Reihenfolge der keys
@@ -168,6 +169,12 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
             "column_sums": g["column_sums"],
             "accounts": accounts,
         })
+
+    # 8.5 Sign-Normalisierung: wenn eine Spalte vorzeichen-invertiert vs. der
+    # Mehrheit ist (Claude-Halluzination, typisch durch Suffix-Minus an Übertrags-
+    # Zwischensummen mehrseitiger Tabellen), Werte der Outlier-Spalte invertieren.
+    # Mathematisch JÜ-neutral, visuell konsistent zwischen Spalten.
+    _normalize_column_signs(columns, groups_out)
 
     # 9. Endwert-Label aus dem juengsten JA (z.B. "Steuerlicher Gewinn nach
     # §4 Abs 3 EStG" bei EÜR, default "Jahresüberschuss"). Steuert die
@@ -263,18 +270,13 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
         _norm_group_name(gname): gname for gname in groups_by_name
     }
 
-    # gkv_section -> Top-Level-Gruppe der Sektion (Sub-Gruppe nur als Fallback)
-    section_to_tpl: dict[str, str] = {}
-    for gname, g in groups_by_name.items():
-        sec = g.get("gkv_section")
-        if not sec or sec == "neutral":
-            continue
-        is_top = g.get("sub_group_of") is None
-        cur = section_to_tpl.get(sec)
-        if cur is None:
-            section_to_tpl[sec] = gname
-        elif is_top and groups_by_name[cur].get("sub_group_of") is not None:
-            section_to_tpl[sec] = gname  # Top schlaegt Sub
+    # gkv_section -> Top-Level-Gruppe der Sektion (Sub-Gruppe nur als Fallback).
+    # Synthetic Parents (von _insert_missing_parents erzeugt, kein eigener
+    # Konten-Träger im Template-Doc) werden de-prioritisiert: ihre realen Subs
+    # gewinnen, sonst gibt's Doppelzählung wenn ältere JAs flach geliefert
+    # werden (z.B. "Aufwendungen für RHB" ohne Numerierung) und das Template
+    # geschachtelt ist (z.B. "4. Materialaufwand" → "4. a) Aufwendungen für RHB").
+    section_to_tpl: dict[str, str] = _build_section_to_tpl(groups_by_name)
 
     for g in doc.get("groups", []):
         gname = g["name"]
@@ -470,17 +472,7 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
     norm_to_tpl: dict[str, str] = {
         _norm_group_name(gname): gname for gname in groups_by_name
     }
-    section_to_tpl: dict[str, str] = {}
-    for gname, g in groups_by_name.items():
-        sec = g.get("gkv_section")
-        if not sec or sec == "neutral":
-            continue
-        is_top = g.get("sub_group_of") is None
-        cur = section_to_tpl.get(sec)
-        if cur is None:
-            section_to_tpl[sec] = gname
-        elif is_top and groups_by_name[cur].get("sub_group_of") is not None:
-            section_to_tpl[sec] = gname
+    section_to_tpl: dict[str, str] = _build_section_to_tpl(groups_by_name)
 
     for doc in ja_docs:
         vj = doc.get("previous_year")
@@ -577,9 +569,129 @@ def _collect_pdf_jue(ja_docs: list[dict], columns: list[dict],
     return out
 
 
+def _build_section_to_tpl(groups_by_name: dict[str, dict]) -> dict[str, str]:
+    """Mapping gkv_section -> Gruppen-Name fuer section-basiertes Routing.
+
+    Priorisierung pro Section:
+    1. Reales Top-Level mit eigener Konten-Erwartung
+    2. Sub-Group (spezifischer als ein synthetisches Parent)
+    3. Synthetisches Top-Level (nur als letzter Ausweg)
+
+    Damit landen Konten aus flach gelieferten JAs (z.B. "Aufwendungen für RHB"
+    ohne Numerierung) konsistent in der Sub des hierarchischen Templates
+    (z.B. "4. a) Aufwendungen für RHB" unter "4. Materialaufwand"), statt im
+    synthetischen Parent — was sonst Doppelzählung produzieren würde wenn
+    spätere JAs die Sub-Group exakt benennen.
+    """
+    out: dict[int, dict[str, str]] = {0: {}, 1: {}, 2: {}}
+    # rank: 0 = real top, 1 = sub, 2 = synthetic top
+    for gname, g in groups_by_name.items():
+        sec = g.get("gkv_section")
+        if not sec or sec == "neutral":
+            continue
+        is_top = g.get("sub_group_of") is None
+        is_synthetic = g.get("_synthetic_parent", False)
+        if is_top and not is_synthetic:
+            rank = 0
+        elif not is_top:
+            rank = 1
+        else:
+            rank = 2
+        out[rank].setdefault(sec, gname)
+    final: dict[str, str] = {}
+    for rank in (0, 1, 2):
+        for sec, gname in out[rank].items():
+            final.setdefault(sec, gname)
+    return final
+
+
+def _infer_column_polarity(col_idx: int, groups: list[dict]) -> str | None:
+    """Polarität einer Spalte aus den Aufwand/Steuer-Werten ableiten.
+
+    Returns 'pos' wenn Aufwand-Summe > 0 (= expenses_positive Konvention),
+    'neg' wenn < 0 (= expenses_negative), None wenn keine Aufwand-Daten.
+    Spiegelt die Heuristik aus builder._infer_sign_conventions, aber auf
+    der konsolidierten Struktur (vor JSONB-Persistierung)."""
+    samples: list[float] = []
+    for g in groups:
+        if g.get("type") not in ("aufwand", "steuer"):
+            continue
+        for acc in g.get("accounts", []):
+            v = acc.get("values", {}).get(col_idx)
+            if v is None:
+                continue
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if abs(v) < 0.01:
+                continue
+            samples.append(v)
+    if not samples:
+        return None
+    return "neg" if sum(samples) < 0 else "pos"
+
+
+def _normalize_column_signs(columns: list[dict], groups: list[dict]) -> None:
+    """Outlier-Spalten mit invertierter Vorzeichen-Konvention erkennen und
+    in-place auf die Mehrheits-Konvention normalisieren.
+
+    Hintergrund: Claude halluziniert in seltenen Fällen die Vorzeichen einer
+    ganzen Spalte (z.B. Tasteone 2022, getriggert durch Suffix-Minus an
+    Übertrags-Zwischensummen mehrseitiger Tabellen). Symptom: Aufwände
+    negativ, Skonti/Boni positiv — also komplett gespiegelte Spalte.
+
+    Strategie: pro Spalte die Polarität ermitteln. Wenn eine Mehrheit klar
+    eine Konvention zeigt (>50% und >=2 Spalten Konsens) und einzelne Spalten
+    abweichen, alle Werte der Outlier-Spalten ×−1. JÜ bleibt mathematisch
+    korrekt; Sign-Inferenz im Builder sieht danach einheitliche Konvention.
+
+    Greift NICHT bei zweideutigen Fällen (1 Spalte, 2 Spalten gleich verteilt)
+    — dort bleibt Status quo.
+    """
+    polarities: dict[int, str] = {}
+    for col_idx in range(len(columns)):
+        p = _infer_column_polarity(col_idx, groups)
+        if p is not None:
+            polarities[col_idx] = p
+
+    if len(polarities) < 2:
+        return  # zu wenig Signal
+
+    pos_cols = [i for i, p in polarities.items() if p == "pos"]
+    neg_cols = [i for i, p in polarities.items() if p == "neg"]
+    total = len(polarities)
+    if len(pos_cols) > total / 2:
+        majority, outliers = "pos", neg_cols
+    elif len(neg_cols) > total / 2:
+        majority, outliers = "neg", pos_cols
+    else:
+        return  # keine echte Mehrheit
+
+    if not outliers:
+        return
+
+    for col_idx in outliers:
+        for g in groups:
+            for acc in g.get("accounts", []):
+                v = acc.get("values", {}).get(col_idx)
+                if isinstance(v, (int, float)):
+                    acc["values"][col_idx] = -v
+            cs = (g.get("column_sums") or {}).get(col_idx)
+            if isinstance(cs, (int, float)):
+                g["column_sums"][col_idx] = -cs
+        # Spalten-Annotation aktualisieren, damit der Builder die richtige
+        # Konvention sieht.
+        columns[col_idx]["sign_convention"] = (
+            "expenses_positive" if majority == "pos" else "expenses_negative"
+        )
+
+
 def _insert_missing_parents(tpl: list[dict]) -> list[dict]:
     """Ensure every sub_group_of reference has a real parent group in the list.
-    If a parent is missing, synthesize it directly before the first child."""
+    If a parent is missing, synthesize it directly before the first child.
+    Synthetic parents are marked with `_synthetic_parent=True` so the section-
+    routing heuristics can de-prioritise them against their real subs."""
     existing = {g["name"] for g in tpl}
     out: list[dict] = []
     inserted: set[str] = set()
@@ -592,6 +704,7 @@ def _insert_missing_parents(tpl: list[dict]) -> list[dict]:
                 "type": g.get("type", "neutral"),
                 "sub_group_of": None,
                 "gkv_section": g.get("gkv_section", "neutral"),
+                "_synthetic_parent": True,
             })
             inserted.add(parent)
         out.append(g)
