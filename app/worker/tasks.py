@@ -79,12 +79,25 @@ def extract_job(job_id: str) -> None:
             extractions.append(extraction)
 
         consolidated = merge_extractions(extractions)
-        # open_questions für Review-Screen: nur aus der jüngsten JA (die ist am relevantesten)
+        # open_questions für Review-Screen: nur aus der jüngsten JA (die ist am relevantesten).
+        # Claude liefert open_questions manchmal als String statt Dict (z.B. "Diese PDF ist
+        # eine EÜR ohne erkennbare GuV-Gruppen"). String-Hinweise als hint-only-Eintraege
+        # wrappen — konsistent zu consolidate.py:_ingest_ja. Sonst crasht {**oq, ...} mit
+        # TypeError: 'str' object is not a mapping (Live-Bug 2026-05-12, Job f55c031b).
         open_questions: list = []
         for doc in extractions:
-            if doc.get("type") == "jahresabschluss":
-                for oq in doc.get("open_questions", []):
-                    open_questions.append({**oq, "document": doc.get("file")})
+            if doc.get("type") != "jahresabschluss":
+                continue
+            file_name = doc.get("file")
+            for oq in doc.get("open_questions", []):
+                if isinstance(oq, str):
+                    open_questions.append({
+                        "konto_nr": None, "bezeichnung": None,
+                        "betrag_gj": None, "hint": oq,
+                        "document": file_name,
+                    })
+                else:
+                    open_questions.append({**oq, "document": file_name})
         payload = {
             "documents": extractions,
             "consolidated": consolidated,

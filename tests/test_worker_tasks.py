@@ -77,6 +77,47 @@ def test_finalize_writes_excel_and_sets_ready():
         repo.set_output.assert_called_once()
 
 
+def test_extract_handles_string_open_questions():
+    """Live-Bug 2026-05-12 (Job f55c031b): Claude liefert open_questions
+    manchmal als String statt Dict (z.B. "Diese PDF ist eine EÜR ohne
+    erkennbare GuV-Gruppen"). `{**oq, ...}` crasht dann mit TypeError:
+    'str' object is not a mapping. Konsistent zu consolidate.py:
+    String-Hinweise als hint-only-Eintraege behandeln, nicht den Job killen.
+    """
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="a lot of text " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV text"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "jahresabschluss"
+        claude.extract_text_pdf.return_value = {
+            "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+            "groups": [],
+            # Mix: ein String-Hinweis + ein normales Dict
+            "open_questions": [
+                "Diese PDF ist eine EÜR ohne erkennbare GuV-Gruppen",
+                {"konto_nr": "5400", "bezeichnung": "Wareneinkauf", "betrag_gj": 1000},
+            ],
+        }
+        # darf NICHT crashen
+        extract_job("job-1")
+        # set_extraction muss aufgerufen worden sein → Job auf review_needed
+        repo.set_extraction.assert_called_once()
+        # Failure-Pfad darf NICHT durchlaufen sein
+        failed_calls = [c for c in repo.set_status.call_args_list
+                        if len(c.args) >= 2 and c.args[1] == JobStatus.FAILED]
+        assert not failed_calls, f"Job sollte nicht failen, aber: {failed_calls}"
+
+
 def test_resume_stuck_jobs_retries_extracting():
     """Fix 1A: nach Deploy-Restart müssen extracting-Jobs wieder aufgenommen werden."""
     from app.worker import tasks as tasks_mod
