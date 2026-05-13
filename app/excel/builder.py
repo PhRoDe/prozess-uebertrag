@@ -148,6 +148,14 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     # _apply_review routed open-question accounts into named groups
     groups = _apply_review_answers(groups, questions, review_answers)
 
+    # Restposten-Konten ergänzen wo column_sum (pdf_sum_gj) von der Konten-
+    # Summe abweicht. Damit bleiben die Excel-Gruppen-Summen Formeln (=SUM(...)),
+    # die Diff wird als eigene Zeile "Restposten — nicht aufgeschlüsselt" sicht-
+    # bar und der User kann sie manuell editieren falls er die fehlenden Konten
+    # nachträgt. Greift auf Bilanzbericht-Format wo Konten teilweise gelistet
+    # sind + Spalten ohne Konten-Werte aber mit pdf_sum_gj.
+    groups = _inject_restposten_accounts(groups)
+
     # "Verminderung" wirkt semantisch mindernd im Jahresergebnis. Die Behandlung
     # passiert direkt in der JÜ-Formel (immer subtrahieren), nicht über type.
     groups = _reclassify_bestandsveraenderung(groups)
@@ -212,32 +220,13 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             target_col = 3 + col_idx
             col_letter = get_column_letter(target_col)
             has_details = detail_end >= detail_start
-            cs_val_for_col = g.get("column_sums", {}).get(col_idx)
             if has_details:
-                # Gruppe hat Konten — SUM-Formel über die Konten.
-                # AUSNAHME: Wenn pdf_sum_gj (column_sum) für diese Spalte
-                # vorliegt und nicht zur Konten-Summe passt (Bilanzbericht-
-                # Format: Konten nur teilweise aufgelistet, Rest in der
-                # Summe + Konten in einer Spalte alle leer obwohl pdf_sum
-                # gesetzt) → direkter column_sum-Wert in der Gruppen-
-                # Zelle. Konten bleiben als Detail-Zeilen darunter sicht-
-                # bar; der User sieht im PDF-Cross-Check 0-Diff.
-                acc_sum = 0.0
-                col_has_any_acc_value = False
-                for a in g.get("accounts", []):
-                    v = (a.get("values") or {}).get(col_idx)
-                    if isinstance(v, (int, float)):
-                        acc_sum += v
-                        col_has_any_acc_value = True
-                if (cs_val_for_col is not None
-                        and (not col_has_any_acc_value
-                             or abs(cs_val_for_col - acc_sum) > 0.01)):
-                    # column_sum (= pdf_sum_gj) ist authoritativ
-                    c = ws.cell(row=sum_row, column=target_col, value=cs_val_for_col)
-                else:
-                    formula = (f"=SUM({col_letter}{detail_start}:"
-                                f"{col_letter}{detail_end})")
-                    c = ws.cell(row=sum_row, column=target_col, value=formula)
+                # Gruppe hat Konten — SUM-Formel über die Konten. Restposten-
+                # Konten sind via _inject_restposten_accounts schon ergänzt
+                # damit SUM == pdf_sum_gj wenn die Quelle abweicht.
+                formula = (f"=SUM({col_letter}{detail_start}:"
+                            f"{col_letter}{detail_end})")
+                c = ws.cell(row=sum_row, column=target_col, value=formula)
             elif has_children:
                 # Parent-Gruppe → SUM über Sub-Summen (Pass 2)
                 c = ws.cell(row=sum_row, column=target_col, value=None)
@@ -247,6 +236,7 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
                 #   - BWA-Aggregat-Gruppen (z.B. "Personalkosten" aus BWA)
                 #   - DATEV-Rohergebnis-Format-JAs ("1. Rohergebnis", "2.a Löhne"
                 #     etc. — Top-Level oder Sub mit pdf_sum_gj aber 0 Konten)
+                cs_val_for_col = g.get("column_sums", {}).get(col_idx)
                 c = ws.cell(row=sum_row, column=target_col,
                             value=cs_val_for_col if cs_val_for_col is not None else 0)
             c.number_format = EUR_FORMAT
@@ -564,6 +554,61 @@ def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dic
     return out
 
 
+def _inject_restposten_accounts(groups: list[dict]) -> list[dict]:
+    """Ergänzt pro Gruppe ein synthetisches "Restposten — nicht aufgeschlüsselt
+    im PDF"-Konto wenn `column_sums[col_idx]` (= pdf_sum_gj) für mindestens
+    eine Spalte von der Konten-Summe abweicht. Der Restposten-Account hat
+    `values: {col_idx: diff}` für jede betroffene Spalte; andere Spalten
+    bleiben None. SUM-Formel in der Gruppen-Sum-Row summiert dann automatisch
+    auf pdf_sum_gj.
+
+    Greift NUR für Gruppen mit accounts (sonst arbeitet die Pass-1-`else`-
+    Branch mit direkter column_sum-Zuweisung). Auch für Spalten ohne accounts-
+    Werte aber mit column_sum greift's: acc_sum = 0, diff = column_sum,
+    Restposten = column_sum → SUM ergibt column_sum.
+
+    Use-Cases:
+    - Bilanzbericht-Format: Konten teilweise gelistet, Rest implizit in Summe
+    - Mehrere JAs: Spalte hat nur in einem JA Konten, in anderen nur pdf_sum_gj
+    """
+    out = []
+    for g in groups:
+        accounts = list(g.get("accounts") or [])
+        col_sums = g.get("column_sums") or {}
+        if not accounts or not col_sums:
+            out.append(g)
+            continue
+        restposten_values: dict[int, float] = {}
+        for col_idx_raw, target in col_sums.items():
+            if target is None:
+                continue
+            try:
+                target_f = float(target)
+            except (TypeError, ValueError):
+                continue
+            col_idx = int(col_idx_raw) if isinstance(col_idx_raw, str) else col_idx_raw
+            acc_sum = 0.0
+            for a in accounts:
+                v = (a.get("values") or {}).get(col_idx)
+                if isinstance(v, (int, float)):
+                    acc_sum += v
+            diff = target_f - acc_sum
+            if abs(diff) > 0.01:
+                restposten_values[col_idx] = round(diff, 2)
+        if restposten_values:
+            g2 = dict(g)
+            g2["accounts"] = accounts + [{
+                "konto_nr": "",
+                "bezeichnung": "Restposten — nicht aufgeschlüsselt im PDF",
+                "values": restposten_values,
+                "confidence": "synthetic",
+            }]
+            out.append(g2)
+        else:
+            out.append(g)
+    return out
+
+
 BWA_ENDWERT_NAME_PATTERNS = [
     "vorläufiges ergebnis",
     "vorläufiges jahresergebnis",
@@ -681,32 +726,27 @@ def _compute_excel_jue_per_column(groups: list[dict],
             is_ja_native_position = has_own_col_sum and col.get("kind") == "ja"
             if col_has_account_data and is_bare_top_level and not is_ja_native_position:
                 continue
-            # Gruppen-Summe: column_sum (pdf_sum_gj) ist authoritativ wenn
-            # gesetzt UND vom Konten-Sum abweicht (Bilanzbericht-Format:
-            # Konten teilweise gelistet, Rest implicit in der Summe). Sonst
-            # die Konten-Summe (+ Sub-Konten wenn Top-Level Parent).
-            acc_sum = 0.0
-            col_has_any_acc_value = False
+            # Gruppen-Summe: Konten (inkl. Restposten falls ergänzt) + Konten
+            # der Sub-Gruppen wenn Top-Level Parent (HGB-Pattern). Sub-Gruppen
+            # einzeln im _endwert_groups-Output haben nur ihre eigenen Konten.
+            grp_sum = 0.0
             for acc in g.get("accounts", []):
                 v = acc.get("values", {}).get(col_idx)
                 if isinstance(v, (int, float)):
-                    acc_sum += v
-                    col_has_any_acc_value = True
+                    grp_sum += v
             if g.get("sub_group_of") is None:
                 for sub in groups:
                     if sub.get("sub_group_of") == g["name"]:
                         for acc in sub.get("accounts", []):
                             v = acc.get("values", {}).get(col_idx)
                             if isinstance(v, (int, float)):
-                                acc_sum += v
-                                col_has_any_acc_value = True
-            cs = (g.get("column_sums") or {}).get(col_idx)
-            if isinstance(cs, (int, float)) and (
-                    not col_has_any_acc_value or abs(cs - acc_sum) > 0.01):
-                # column_sum (pdf_sum_gj) authoritativ
-                grp_sum = cs
-            else:
-                grp_sum = acc_sum
+                                grp_sum += v
+            # BWA-Aggregat ohne Konten: column_sum direkt nehmen (else-Branch
+            # in Pass 1 setzt die Zelle dort auch direkt).
+            if grp_sum == 0.0 and not g.get("accounts"):
+                cs = (g.get("column_sums") or {}).get(col_idx)
+                if isinstance(cs, (int, float)):
+                    grp_sum = cs
             role = _resolve_role(g)
             if conv == "expenses_negative":
                 total += grp_sum

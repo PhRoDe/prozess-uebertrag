@@ -72,23 +72,29 @@ def test_ja_sums_are_formulas():
     assert isinstance(val, str) and val.startswith("=SUM")
 
 
-def test_bwa_sum_direct_value_when_acc_sum_differs_from_pdf_sum():
+def test_bwa_sum_when_acc_sum_differs_from_pdf_sum_via_restposten():
     """Wenn die Gruppe Konten hat aber column_sum (= pdf_sum_gj) fuer die
-    Spalte abweicht (Bilanzbericht: Konten teilweise gelistet, Rest in der
-    Summe), wird der column_sum-Direktwert in die Gruppen-Zelle geschrieben.
-    Hier konkret: BWA-Spalte hat column_sum=500000, die Konten haben aber
-    keine Werte fuer die BWA-Spalte (values nur fuer 2023/2024) → Direkt-
-    wert 500000 statt SUM(leer)=0."""
+    Spalte abweicht: Restposten-Konto ergaenzt, Excel-Gruppen-Zelle bleibt
+    `=SUM(...)`-Formel. Excel-Wert == pdf_sum_gj durch den Restposten.
+
+    CLAUDE.md-Regel: "Alle Excel-Zwischensummen MÜSSEN Formeln sein (=SUM(...)
+    oder Kaskaden). Niemals hardcoded Werte." → also Restposten als zusätzliche
+    Detail-Zeile, nicht column_sum-Direktwert in der Sum-Zelle.
+    """
     xlsx = build_excel(_sample(with_bwa=True))
     ws = _ws(xlsx)
     umsatz_row = _find_row(ws, "Umsatzerlöse")
-    bwa_val = ws.cell(umsatz_row, 5).value  # BWA 2025 = Spalte 5
-    # Konten haben keinen Wert fuer BWA-Spalte → column_sum-Direktwert
-    assert bwa_val == 500000, f"erwartet 500000, ist {bwa_val!r}"
-    # JA-Spalten (mit Konten-Werten) haben SUM-Formel
-    ja_val = ws.cell(umsatz_row, 3).value  # 2023 = Spalte 3
-    assert isinstance(ja_val, str) and ja_val.startswith("=SUM"), \
-        f"JA-Spalte sollte SUM-Formel haben, ist {ja_val!r}"
+    # Alle Spalten haben SUM-Formel (auch die BWA-Spalte mit Restposten)
+    for col in (3, 4, 5):
+        val = ws.cell(umsatz_row, col).value
+        assert isinstance(val, str) and val.startswith("=SUM"), \
+            f"Spalte {col} sollte SUM-Formel haben, ist {val!r}"
+    # Restposten-Zeile existiert
+    restposten_row = _find_row(ws, "  Restposten — nicht aufgeschlüsselt im PDF")
+    assert restposten_row is not None, "Restposten-Konto sollte ergänzt sein"
+    # Restposten 2023 (Spalte 3) = pdf_sum_gj - acc_sum, hier 0 weil cs gleich acc
+    # Restposten 2025 (Spalte 5, BWA) = 500000 - 0 = 500000
+    assert ws.cell(restposten_row, 5).value == 500000
 
 
 def test_jahresergebnis_expenses_negative_is_simple_sum():
@@ -613,14 +619,16 @@ def test_group_with_accounts_falls_back_to_column_sum_when_column_empty():
     xlsx = build_excel(data)
     ws = _ws(xlsx)
     zinsen_row = _find_row(ws, "6. Zinsen")
-    # 2023-Spalte (col 3 = "C"): SUM-Formel über die accounts (=4511.97)
-    val_2023 = ws.cell(zinsen_row, 3).value
-    assert isinstance(val_2023, str) and val_2023.startswith("=SUM"), \
-        f"2023-Spalte sollte SUM-Formel haben (acc=4511.97 da), ist {val_2023!r}"
-    # 2024-Spalte (col 4 = "D"): column_sum-Direktwert weil accounts leer
-    val_2024 = ws.cell(zinsen_row, 4).value
-    assert val_2024 == 4912.98, \
-        f"2024-Spalte sollte column_sum 4912.98 sein (accounts leer), ist {val_2024!r}"
+    # BEIDE Spalten: SUM-Formel (Restposten ergänzt für 2024)
+    for col in (3, 4):
+        v = ws.cell(zinsen_row, col).value
+        assert isinstance(v, str) and v.startswith("=SUM"), \
+            f"Spalte {col} sollte SUM-Formel haben, ist {v!r}"
+    # Restposten-Zeile mit 2024-Wert = 4912.98 (acc_sum=0 → diff=column_sum)
+    restposten_row = _find_row(ws, "  Restposten — nicht aufgeschlüsselt im PDF")
+    assert restposten_row is not None, "Restposten-Konto sollte ergänzt sein"
+    assert ws.cell(restposten_row, 4).value == 4912.98, \
+        f"Restposten 2024 sollte 4912.98 sein, ist {ws.cell(restposten_row, 4).value!r}"
 
 
 def test_rohergebnis_format_uses_column_sums_when_no_accounts():
