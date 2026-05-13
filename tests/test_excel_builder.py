@@ -139,14 +139,25 @@ def test_pdf_jue_row_rendered_when_pdf_value_present():
     assert isinstance(diff_formula, str) and diff_formula.startswith("=")
 
 
-def test_pdf_jue_mismatch_raises_value_error():
-    """JÜ-Formel weicht vom PDF-Wert ab → Build muss FAILEN, nicht ein
-    fehlerhaftes Excel ausliefern. Job geht so auf Status FAILED, der User
-    sieht eine konkrete Fehlermeldung."""
+def test_pdf_jue_mismatch_creates_fragen_entry():
+    """JÜ-Formel weicht vom PDF-Wert ab → Excel wird trotzdem gebaut, aber
+    die Diff erscheint im Fragen-Sheet (sichtbar für den User) und in der
+    'Differenz Excel ↔ PDF'-Zeile pro Spalte. Vorher: ValueError → keine
+    Excel → User stuck. Jetzt: User bekommt die Excel, sieht die Diff
+    prominent in der Anker-Zeile und im Fragen-Sheet, kann manuell prüfen
+    (Live-Bug 2026-05-12 Job df31b6cd: Bilanzbericht-Mandat mit
+    unvollständig extrahierten Konten — hard-fail blockierte den User
+    obwohl die Excel grundsätzlich nutzbar gewesen wäre)."""
     cons = _sample()
     cons["pdf_jue_per_column"] = {0: 530000.00, 1: 700000.00}
-    with pytest.raises(ValueError, match="Excel-Jahresergebnis stimmt nicht"):
-        build_excel(cons)
+    xlsx = build_excel(cons)
+    wb = load_workbook(io.BytesIO(xlsx))
+    assert "Fragen" in wb.sheetnames, "Fragen-Sheet muss bei JÜ-Mismatch angelegt werden"
+    fragen = wb["Fragen"]
+    fragen_rows = list(fragen.iter_rows(values_only=True))
+    jue_mismatches = [r for r in fragen_rows if r[0] == "jue_excel_vs_pdf_mismatch"]
+    assert len(jue_mismatches) >= 1, \
+        f"Mindestens ein jue_excel_vs_pdf_mismatch-Eintrag erwartet, gefunden: {fragen_rows}"
 
 
 def test_no_fragen_sheet_when_clean():
@@ -556,3 +567,63 @@ def test_eur_pdf_anker_label_dynamisch():
     label_row = _find_row(ws, "PDF-Steuerlicher Gewinn nach §4 Abs. 3 EStG")
     assert label_row is not None
     assert abs(ws.cell(label_row, 3).value - 295979.64) < 0.01
+
+
+def test_rohergebnis_format_uses_column_sums_when_no_accounts():
+    """Live-Bug 2026-05-12 (Job df31b6cd): DATEV-Rohergebnis-Format-JAs
+    liefern fast alle GuV-Top-Levels OHNE einzelne Konten — nur pdf_sum_gj
+    pro Gruppe. Beispiel:
+      - "1. Rohergebnis" type=ertrag, accounts=0, pdf_sum_gj=1.190.321,13
+      - "2. Personalaufwand a) Löhne" type=aufwand, accounts=0,
+        pdf_sum_gj=560.694,45, sub_of="2. Personalaufwand"
+      - "4. sonstige betriebliche Aufwendungen" type=aufwand, accounts>0
+
+    Vorher: Sub-Zelle wird auf 0 gesetzt (else-Branch im Pass 1), JÜ-Formel
+    überspringt Rohergebnis-Top-Level (is_bare_top_level-Heuristik) → JÜ-Excel
+    extrem falsch, Build-Time-Cross-Check fail. User sieht "Verarbeitung
+    fehlgeschlagen".
+
+    Fix: Wenn accounts=0 aber column_sums[col_idx] gesetzt ist, den Wert
+    in die Zelle schreiben + in die JÜ-Formel einbeziehen.
+    """
+    cols = [{"label": "2024", "kind": "ja", "year": 2024,
+             "sign_convention": "expenses_positive"}]
+    groups = [
+        {"name": "1. Rohergebnis", "type": "ertrag", "sub_group_of": None,
+         "gkv_section": "umsatzerloese",
+         "column_sums": {0: 1190321.13}, "accounts": []},
+        {"name": "2. Personalaufwand", "type": "aufwand", "sub_group_of": None,
+         "gkv_section": "personalaufwand_loehne",
+         "column_sums": {}, "accounts": []},
+        {"name": "2. Personalaufwand a) Löhne", "type": "aufwand",
+         "sub_group_of": "2. Personalaufwand",
+         "gkv_section": "personalaufwand_loehne",
+         "column_sums": {0: 560694.45}, "accounts": []},
+        {"name": "2. Personalaufwand b) Sozial", "type": "aufwand",
+         "sub_group_of": "2. Personalaufwand",
+         "gkv_section": "personalaufwand_sozial",
+         "column_sums": {0: 65357.11}, "accounts": []},
+        {"name": "4. sonstige betriebliche Aufwendungen", "type": "aufwand",
+         "sub_group_of": None, "gkv_section": "sonst_betr_aufw",
+         "column_sums": {0: 214284.17},
+         "accounts": [
+             {"konto_nr": "6300", "bezeichnung": "div. Aufw.",
+              "values": {0: 214284.17}, "confidence": "high"},
+         ]},
+    ]
+    # Erwarteter Endwert: 1190321.13 - 560694.45 - 65357.11 - 214284.17
+    #                   = 349985.40
+    data = {"columns": cols, "groups": groups, "questions": [],
+            "pdf_jue_per_column": {0: 349985.40},
+            "endwert_label": "Jahresüberschuss"}
+    # Darf nicht mit Cross-Check-ValueError fehlschlagen
+    xlsx = build_excel(data)
+    ws = _ws(xlsx)
+    # Rohergebnis-Zelle: column_sum-Wert, nicht 0
+    rohe_row = _find_row(ws, "1. Rohergebnis")
+    assert ws.cell(rohe_row, 3).value == 1190321.13, \
+        f"Rohergebnis-Zelle sollte 1.190.321,13 sein, ist {ws.cell(rohe_row, 3).value}"
+    # 2.a Löhne-Zelle: column_sum-Wert, nicht 0
+    loehne_row = _find_row(ws, "  2. Personalaufwand a) Löhne")
+    assert ws.cell(loehne_row, 3).value == 560694.45, \
+        f"Löhne-Zelle sollte 560.694,45 sein, ist {ws.cell(loehne_row, 3).value}"

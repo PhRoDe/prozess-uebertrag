@@ -217,15 +217,20 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
                 # seit BWA auch Einzelkonten liefert)
                 formula = f"=SUM({col_letter}{detail_start}:{col_letter}{detail_end})"
                 c = ws.cell(row=sum_row, column=target_col, value=formula)
-            elif col["kind"] == "bwa":
-                # BWA ohne Konten für diese Gruppe → direkter Wert aus column_sums
-                bwa_val = g.get("column_sums", {}).get(col_idx)
-                c = ws.cell(row=sum_row, column=target_col, value=bwa_val)
             elif has_children:
                 # Parent-Gruppe → SUM über Sub-Summen (Pass 2)
                 c = ws.cell(row=sum_row, column=target_col, value=None)
             else:
-                c = ws.cell(row=sum_row, column=target_col, value=0)
+                # Keine Konten, keine Children — Wert aus column_sums übernehmen
+                # wenn vorhanden. Trifft auf:
+                #   - BWA-Aggregat-Gruppen (z.B. "Personalkosten" aus BWA)
+                #   - DATEV-Rohergebnis-Format-JAs ("1. Rohergebnis", "2.a Löhne"
+                #     etc. — Top-Level oder Sub mit pdf_sum_gj aber 0 Konten)
+                # Vorher: only BWA-kind → JA-Subs mit pdf_sum_gj wurden auf 0
+                # gerendert (Live-Bug Job df31b6cd, 2026-05-12).
+                cs_val = g.get("column_sums", {}).get(col_idx)
+                c = ws.cell(row=sum_row, column=target_col,
+                            value=cs_val if cs_val is not None else 0)
             c.number_format = EUR_FORMAT
             c.font = BOLD if not is_sub else BOLD_LIGHT
 
@@ -289,7 +294,15 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
                 and not g.get("accounts")
                 and not any(s.get("sub_group_of") == g["name"] for s in groups)
             )
-            if col_has_account_data and is_bare_top_level:
+            # Wenn die Gruppe in DIESER JA-Spalte einen column_sum hat, ist sie
+            # kein redundanter BWA-Aggregat-Schatten sondern eine echte JA-Eigen-
+            # Position (z.B. "1. Rohergebnis" mit pdf_sum_gj im DATEV-
+            # Rohergebnis-Format). Bei BWA-Spalten bleibt die alte Heuristik
+            # aktiv: column_sum kommt da typischerweise aus dem BWA-Doc selbst
+            # und ist Aggregat-Sicht der JA-Konten.
+            has_own_col_sum = g.get("column_sums", {}).get(col_idx) is not None
+            is_ja_native_position = has_own_col_sum and col.get("kind") == "ja"
+            if col_has_account_data and is_bare_top_level and not is_ja_native_position:
                 continue  # redundante BWA-Aggregat-Sicht
             sum_r = group_sum_rows.get(g["name"])
             if sum_r is None:
@@ -400,28 +413,27 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             c.number_format = EUR_FORMAT
             c.font = BOLD_LIGHT
 
-        # Build-Zeit-Cross-Check: Excel-JUE numerisch berechnen und gegen PDF-JUE
-        # vergleichen. Diff > 1 ct → ValueError, Job geht auf FAILED. Damit kein
-        # silently falsches Excel ausgeliefert wird.
+        # Build-Zeit-Cross-Check: Excel-JÜ numerisch gegen PDF-JÜ. Bei Diff > 1 ct
+        # erscheint die Diff als Eintrag im Fragen-Sheet — der User sieht's auch
+        # direkt in der "Differenz Excel ↔ PDF"-Zeile pro Spalte. Damit ist die
+        # Diff nicht "silent" (Anker-Zeile macht sie explizit), aber der Job
+        # produziert trotzdem eine Excel die der User manuell prüfen und ggf.
+        # korrigieren kann (vorher: ValueError → keine Excel = User stuck).
+        # Strukturelle Bugs (alle accounts leer, alle Werte None) sind weiter
+        # hard-fail über die accounts_total/accounts_with_values-Prüfung oben.
         excel_jue = _compute_excel_jue_per_column(groups, columns)
-        jue_errors = []
         for col_idx, col in enumerate(columns):
             pdf_v = pdf_jue_per_column.get(col_idx)
             excel_v = excel_jue.get(col_idx)
             if pdf_v is None or excel_v is None:
                 continue
             if abs(excel_v - pdf_v) > 0.01:
-                jue_errors.append(
-                    f"{col.get('label')}: PDF-JÜ {pdf_v:,.2f} ≠ Excel-JÜ "
-                    f"{excel_v:,.2f} (Diff {excel_v - pdf_v:+,.2f})"
-                )
-        if jue_errors:
-            raise ValueError(
-                f"Excel-{formula_label} stimmt nicht mit PDF-{pdf_anker_label} "
-                "überein. Mögliche Ursachen: fehlende/falsch extrahierte Konten, "
-                "Vorzeichen-Probleme, Cross-Year-Routing. Bitte PDF prüfen oder "
-                "Job neu starten.\nBetroffen:\n  - " + "\n  - ".join(jue_errors)
-            )
+                questions.append({
+                    "type": "jue_excel_vs_pdf_mismatch",
+                    "column_label": col.get("label"),
+                    "pdf_says": round(pdf_v, 2),
+                    "excel_says": round(excel_v, 2),
+                })
 
     # Spaltenbreiten
     ws.column_dimensions["A"].width = 10
@@ -569,7 +581,9 @@ def _compute_excel_jue_per_column(groups: list[dict],
                 and not g.get("accounts")
                 and not any(s.get("sub_group_of") == g["name"] for s in groups)
             )
-            if col_has_account_data and is_bare_top_level:
+            has_own_col_sum = g.get("column_sums", {}).get(col_idx) is not None
+            is_ja_native_position = has_own_col_sum and col.get("kind") == "ja"
+            if col_has_account_data and is_bare_top_level and not is_ja_native_position:
                 continue
             # Gruppen-Summe: eigene Konten + Konten der Sub-Gruppen wenn ein
             # Top-Level mit eigenen accounts ist (HGB-Pattern). Sub-Gruppen

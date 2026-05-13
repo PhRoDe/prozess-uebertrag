@@ -495,6 +495,14 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                 else norm_to_tpl.get(gnorm)
                 or (section_to_tpl.get(gsection) if gsection else None)
             )
+            # Gruppen-Summe (PDF-VJ) auf Ziel-Gruppe schreiben — für DATEV-
+            # Rohergebnis-Format-JAs ohne Einzelkonten ist das die einzige
+            # Quelle für VJ-Werte in der VJ-Spalte. setdefault, damit ein
+            # bereits gesetzter Eigenjahres-column_sum (aus _ingest_ja) nicht
+            # überschrieben wird.
+            if grp_target_name and g.get("pdf_sum_vj") is not None:
+                groups_by_name[grp_target_name]["column_sums"].setdefault(
+                    vj_col_idx, g["pdf_sum_vj"])
             for acc in g.get("accounts", []):
                 if acc.get("betrag_vj") is None:
                     continue
