@@ -72,15 +72,23 @@ def test_ja_sums_are_formulas():
     assert isinstance(val, str) and val.startswith("=SUM")
 
 
-def test_bwa_sum_direct_value_when_no_accounts():
-    """BWA-Spalten bekommen nur direct value wenn die Gruppe keine Konten hat.
-    Mit Konten: auch BWA wird per SUM-Formel summiert."""
+def test_bwa_sum_direct_value_when_acc_sum_differs_from_pdf_sum():
+    """Wenn die Gruppe Konten hat aber column_sum (= pdf_sum_gj) fuer die
+    Spalte abweicht (Bilanzbericht: Konten teilweise gelistet, Rest in der
+    Summe), wird der column_sum-Direktwert in die Gruppen-Zelle geschrieben.
+    Hier konkret: BWA-Spalte hat column_sum=500000, die Konten haben aber
+    keine Werte fuer die BWA-Spalte (values nur fuer 2023/2024) → Direkt-
+    wert 500000 statt SUM(leer)=0."""
     xlsx = build_excel(_sample(with_bwa=True))
     ws = _ws(xlsx)
     umsatz_row = _find_row(ws, "Umsatzerlöse")
     bwa_val = ws.cell(umsatz_row, 5).value  # BWA 2025 = Spalte 5
-    # Hier hat Umsatzerlöse 1 Konto (8400) → SUM-Formel
-    assert isinstance(bwa_val, str) and bwa_val.startswith("=SUM")
+    # Konten haben keinen Wert fuer BWA-Spalte → column_sum-Direktwert
+    assert bwa_val == 500000, f"erwartet 500000, ist {bwa_val!r}"
+    # JA-Spalten (mit Konten-Werten) haben SUM-Formel
+    ja_val = ws.cell(umsatz_row, 3).value  # 2023 = Spalte 3
+    assert isinstance(ja_val, str) and ja_val.startswith("=SUM"), \
+        f"JA-Spalte sollte SUM-Formel haben, ist {ja_val!r}"
 
 
 def test_jahresergebnis_expenses_negative_is_simple_sum():
@@ -393,83 +401,85 @@ def test_jue_formel_addiert_bestandsveraenderung():
     assert f"-C{bestand_row}" not in formula
 
 
-def test_jue_ignoriert_redundante_aggregat_gruppen():
-    """BWA-Aggregat-Gruppen ohne eigene Konten (z.B. 'Personalkosten' = Sum
-    von 'Löhne' + 'Soz. Abg.') duerfen die JÜ-Formel nicht doppelt belasten,
-    wenn die JA-Gruppen die Konten bereits enthalten."""
+def test_bwa_jue_uses_bwa_endwert_not_aggregate_sum():
+    """Live-Bug 2026-05-13 (Job df31b6cd): BWA-Spalte zeigte JÜ 5,1 Mio statt
+    23.585. Ursache: JÜ-Formel addierte alle Top-Level-Gruppen einer BWA inkl.
+    der semantischen Aggregat-Stufen (Rohertrag = Umsatz - Material, Gesamt-
+    leistung = Umsatz + Bestandsv. + Aktiv. Eigenl., Betriebsergebnis, etc.).
+    Diese Aggregate sind algebraische Kombinationen ihrer Komponenten, die als
+    eigene Top-Levels parallel existieren → Mehrfach-Zählung.
+
+    Fix: Für BWA-Spalten KEINE JÜ-Formel über Top-Levels. Stattdessen direkte
+    Referenz auf den BWA-internen Endwert (Vorläufiges Ergebnis o.ä.). Damit
+    matcht die BWA-Spalten-JÜ genau dem in der BWA stehenden Wert.
+    """
     cons = {
         "columns": [
             {"label": "BWA 2025", "kind": "bwa", "year": 2025,
              "sign_convention": "expenses_positive"},
         ],
         "groups": [
-            # JA-Gruppe mit Konten: Löhne 1000, Soz. Abg. 200
-            {"name": "Löhne und Gehälter", "type": "aufwand",
-             "gkv_section": "personalaufwand_loehne",
-             "sub_group_of": None, "column_sums": {},
-             "accounts": [{"konto_nr": "6020", "bezeichnung": "Gehälter",
-                            "values": {0: 1000}, "confidence": "high"}]},
-            {"name": "Soz. Abgaben", "type": "aufwand",
-             "gkv_section": "personalaufwand_sozial",
-             "sub_group_of": None, "column_sums": {},
-             "accounts": [{"konto_nr": "6110", "bezeichnung": "Sozialabgaben",
-                            "values": {0: 200}, "confidence": "high"}]},
-            {"name": "Umsatzerlöse", "type": "ertrag",
-             "gkv_section": "umsatzerloese",
-             "sub_group_of": None, "column_sums": {},
-             "accounts": [{"konto_nr": "8400", "bezeichnung": "Umsatz",
-                            "values": {0: 5000}, "confidence": "high"}]},
-            # BWA-Aggregat ohne eigene Konten — Sum schon in JA-Gruppen
-            {"name": "Personalkosten", "type": "aufwand",
-             "gkv_section": "neutral", "sub_group_of": None,
-             "column_sums": {0: 1200},  # = 1000 + 200
-             "accounts": []},
-        ],
-        "questions": [],
-    }
-    xlsx = build_excel(cons)
-    ws = _ws(xlsx)
-    je_row = _find_row(ws, "Jahresergebnis")
-    personalkosten_row = _find_row(ws, "Personalkosten")
-    formula = ws.cell(je_row, 3).value
-    # Personalkosten-Zeile darf NICHT in der JE-Formel auftauchen
-    assert f"C{personalkosten_row}" not in formula, \
-        f"Aggregat-Gruppe 'Personalkosten' wurde doppelt gezaehlt: {formula}"
-    # JÜ = Umsatz - Löhne - Soz.Abg. = 5000 - 1000 - 200 = 3800 (NICHT 2600 mit Doppelzählung)
-    loehne_row = _find_row(ws, "Löhne und Gehälter")
-    soz_row = _find_row(ws, "Soz. Abgaben")
-    umsatz_row = _find_row(ws, "Umsatzerlöse")
-    assert f"C{loehne_row}" in formula
-    assert f"C{soz_row}" in formula
-    assert f"C{umsatz_row}" in formula
-
-
-def test_jue_nutzt_aggregate_wenn_keine_konten_in_spalte():
-    """Wenn eine Spalte (typisch reine BWA ohne JA) keine Konten-Daten hat,
-    werden die Aggregat-Gruppen normal in JÜ einbezogen."""
-    cons = {
-        "columns": [
-            {"label": "BWA 2025", "kind": "bwa", "year": 2025,
-             "sign_convention": "expenses_positive"},
-        ],
-        "groups": [
-            # Keine JA-Gruppen, nur BWA-Aggregate
             {"name": "Umsatzerlöse", "type": "ertrag",
              "gkv_section": "umsatzerloese", "sub_group_of": None,
-             "column_sums": {0: 5000}, "accounts": []},
+             "column_sums": {0: 3000000}, "accounts": []},
+            {"name": "Gesamtleistung", "type": "ertrag",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 3000000}, "accounts": []},  # Aggregat von Umsatz
+            {"name": "Material-/Wareneinkauf", "type": "aufwand",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 2000000}, "accounts": []},
+            {"name": "Rohertrag", "type": "neutral",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 1000000}, "accounts": []},  # Aggregat
             {"name": "Personalkosten", "type": "aufwand",
              "gkv_section": "neutral", "sub_group_of": None,
-             "column_sums": {0: 1200}, "accounts": []},
+             "column_sums": {0: 800000}, "accounts": []},
+            {"name": "Betriebsergebnis", "type": "neutral",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 200000}, "accounts": []},  # Aggregat
+            {"name": "Steuern Einkommen u. Ertrag", "type": "steuer",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 50000}, "accounts": []},
+            {"name": "Vorläufiges Ergebnis", "type": "neutral",
+             "gkv_section": "neutral", "sub_group_of": None,
+             "column_sums": {0: 150000}, "accounts": []},  # echter BWA-Endwert
         ],
         "questions": [],
     }
     xlsx = build_excel(cons)
     ws = _ws(xlsx)
     je_row = _find_row(ws, "Jahresergebnis")
-    personalkosten_row = _find_row(ws, "Personalkosten")
+    endwert_row = _find_row(ws, "Vorläufiges Ergebnis")
     formula = ws.cell(je_row, 3).value
-    # Hier MUSS Personalkosten in der Formel sein (nichts anderes da)
-    assert f"C{personalkosten_row}" in formula
+    # JÜ-Zelle: direkte Referenz auf BWA-Endwert "=Cxx", nicht "=C2+C3+..."
+    expected = f"=C{endwert_row}"
+    assert formula == expected, \
+        f"BWA-JÜ sollte direkter Verweis auf BWA-Endwert sein " \
+        f"({expected}), ist {formula!r}. " \
+        f"Vermutlich Aggregat-Doppelzählung wieder eingeführt."
+
+
+def test_bwa_jue_leer_wenn_kein_endwert_erkennbar():
+    """Wenn die BWA-Daten keinen erkennbaren Endwert-Namen ("Vorläufiges
+    Ergebnis" o.ä.) haben, bleibt die JÜ-Zelle der BWA-Spalte leer — besser
+    als eine falsche Aggregat-Summe."""
+    cons = {
+        "columns": [
+            {"label": "BWA 2025", "kind": "bwa", "year": 2025,
+             "sign_convention": "expenses_positive"},
+        ],
+        "groups": [
+            {"name": "Umsatzerlöse", "type": "ertrag",
+             "gkv_section": "umsatzerloese", "sub_group_of": None,
+             "column_sums": {0: 3000000}, "accounts": []},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(cons)
+    ws = _ws(xlsx)
+    je_row = _find_row(ws, "Jahresergebnis")
+    assert ws.cell(je_row, 3).value is None, \
+        "BWA-JÜ ohne erkennbaren Endwert sollte leer sein"
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +577,50 @@ def test_eur_pdf_anker_label_dynamisch():
     label_row = _find_row(ws, "PDF-Steuerlicher Gewinn nach §4 Abs. 3 EStG")
     assert label_row is not None
     assert abs(ws.cell(label_row, 3).value - 295979.64) < 0.01
+
+
+def test_group_with_accounts_falls_back_to_column_sum_when_column_empty():
+    """Live-Bug 2026-05-12 Edge-Case: Eine Gruppe hat accounts (z.B. "6. Zinsen
+    und ähnliche Aufwendungen" mit 3 Konten aus älteren JAs), aber im jüngsten
+    JA stehen keine Einzelkonten — nur pdf_sum_gj. Konsolidiert: 3 Konten mit
+    Werten in 2021-2023, alle None für 2024, column_sums[2024]=4912.98.
+
+    Vorher: has_details=True (accounts existieren) → SUM-Formel überall.
+    Für 2024-Spalte: SUM(0,0,0)=0 statt 4912.98 → Diff in JÜ-Formel.
+
+    Fix: Wenn accounts in dieser Spalte ALLE leer (kein numerischer Wert),
+    column_sum-Wert direkt verwenden statt SUM(leere Zellen)=0.
+    """
+    cols = [
+        {"label": "2023", "kind": "ja", "year": 2023, "sign_convention": "expenses_positive"},
+        {"label": "2024", "kind": "ja", "year": 2024, "sign_convention": "expenses_positive"},
+    ]
+    groups = [
+        {"name": "Umsatzerlöse", "type": "ertrag", "sub_group_of": None,
+         "gkv_section": "umsatzerloese", "column_sums": {},
+         "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                       "values": {0: 100000, 1: 110000}, "confidence": "high"}]},
+        {"name": "6. Zinsen", "type": "aufwand", "sub_group_of": None,
+         "gkv_section": "zinsaufwand",
+         "column_sums": {1: 4912.98},  # nur 2024 hat pdf_sum_gj
+         "accounts": [
+             {"konto_nr": "7320", "bezeichnung": "Zinsen lfr.",
+              "values": {0: 4511.97}, "confidence": "high"},  # nur 2023 hat Konten-Wert
+         ]},
+    ]
+    data = {"columns": cols, "groups": groups, "questions": [],
+            "endwert_label": "Jahresüberschuss"}
+    xlsx = build_excel(data)
+    ws = _ws(xlsx)
+    zinsen_row = _find_row(ws, "6. Zinsen")
+    # 2023-Spalte (col 3 = "C"): SUM-Formel über die accounts (=4511.97)
+    val_2023 = ws.cell(zinsen_row, 3).value
+    assert isinstance(val_2023, str) and val_2023.startswith("=SUM"), \
+        f"2023-Spalte sollte SUM-Formel haben (acc=4511.97 da), ist {val_2023!r}"
+    # 2024-Spalte (col 4 = "D"): column_sum-Direktwert weil accounts leer
+    val_2024 = ws.cell(zinsen_row, 4).value
+    assert val_2024 == 4912.98, \
+        f"2024-Spalte sollte column_sum 4912.98 sein (accounts leer), ist {val_2024!r}"
 
 
 def test_rohergebnis_format_uses_column_sums_when_no_accounts():

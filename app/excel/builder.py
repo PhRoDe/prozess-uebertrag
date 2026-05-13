@@ -212,11 +212,32 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
             target_col = 3 + col_idx
             col_letter = get_column_letter(target_col)
             has_details = detail_end >= detail_start
+            cs_val_for_col = g.get("column_sums", {}).get(col_idx)
             if has_details:
-                # Gruppe hat Konten — SUM-Formel (gilt für JA *und* BWA,
-                # seit BWA auch Einzelkonten liefert)
-                formula = f"=SUM({col_letter}{detail_start}:{col_letter}{detail_end})"
-                c = ws.cell(row=sum_row, column=target_col, value=formula)
+                # Gruppe hat Konten — SUM-Formel über die Konten.
+                # AUSNAHME: Wenn pdf_sum_gj (column_sum) für diese Spalte
+                # vorliegt und nicht zur Konten-Summe passt (Bilanzbericht-
+                # Format: Konten nur teilweise aufgelistet, Rest in der
+                # Summe + Konten in einer Spalte alle leer obwohl pdf_sum
+                # gesetzt) → direkter column_sum-Wert in der Gruppen-
+                # Zelle. Konten bleiben als Detail-Zeilen darunter sicht-
+                # bar; der User sieht im PDF-Cross-Check 0-Diff.
+                acc_sum = 0.0
+                col_has_any_acc_value = False
+                for a in g.get("accounts", []):
+                    v = (a.get("values") or {}).get(col_idx)
+                    if isinstance(v, (int, float)):
+                        acc_sum += v
+                        col_has_any_acc_value = True
+                if (cs_val_for_col is not None
+                        and (not col_has_any_acc_value
+                             or abs(cs_val_for_col - acc_sum) > 0.01)):
+                    # column_sum (= pdf_sum_gj) ist authoritativ
+                    c = ws.cell(row=sum_row, column=target_col, value=cs_val_for_col)
+                else:
+                    formula = (f"=SUM({col_letter}{detail_start}:"
+                                f"{col_letter}{detail_end})")
+                    c = ws.cell(row=sum_row, column=target_col, value=formula)
             elif has_children:
                 # Parent-Gruppe → SUM über Sub-Summen (Pass 2)
                 c = ws.cell(row=sum_row, column=target_col, value=None)
@@ -226,11 +247,8 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
                 #   - BWA-Aggregat-Gruppen (z.B. "Personalkosten" aus BWA)
                 #   - DATEV-Rohergebnis-Format-JAs ("1. Rohergebnis", "2.a Löhne"
                 #     etc. — Top-Level oder Sub mit pdf_sum_gj aber 0 Konten)
-                # Vorher: only BWA-kind → JA-Subs mit pdf_sum_gj wurden auf 0
-                # gerendert (Live-Bug Job df31b6cd, 2026-05-12).
-                cs_val = g.get("column_sums", {}).get(col_idx)
                 c = ws.cell(row=sum_row, column=target_col,
-                            value=cs_val if cs_val is not None else 0)
+                            value=cs_val_for_col if cs_val_for_col is not None else 0)
             c.number_format = EUR_FORMAT
             c.font = BOLD if not is_sub else BOLD_LIGHT
 
@@ -278,6 +296,28 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
         target_col = 3 + col_idx
         col_letter = get_column_letter(target_col)
         conv = col.get("sign_convention", "expenses_negative")
+
+        # BWA-Spalten: direkter Endwert aus der BWA selbst (Vorläufiges Ergebnis
+        # o.ä.), KEINE Formel über Top-Level-Gruppen. Begründung: BWAs enthalten
+        # Aggregat-Stufen (Rohertrag, Gesamtleistung, Betriebsergebnis, ...) als
+        # eigene Top-Level-Gruppen — die sind algebraische Kombinationen ihrer
+        # Komponenten (Umsatzerlöse, Material-/Wareneinkauf, etc.), die parallel
+        # auch als Top-Level vorhanden sind. Eine JÜ-Formel über alle Top-Levels
+        # zählt diese Beträge mehrfach (Live-Bug 2026-05-13: BWA-2025-JÜ
+        # 5.140.482 statt 23.585). Stattdessen Endwert direkt referenzieren.
+        if col.get("kind") == "bwa":
+            bwa_endwert_row = _find_bwa_endwert_row(groups, group_sum_rows, col_idx)
+            if bwa_endwert_row is not None:
+                formula = f"={col_letter}{bwa_endwert_row}"
+                c = ws.cell(row=je_row, column=target_col, value=formula)
+                c.number_format = EUR_FORMAT
+                c.font = BOLD
+            else:
+                # Keine erkennbare BWA-Endwert-Gruppe → JÜ-Zelle bleibt leer
+                # (statt falsche Aggregat-Summe zu schreiben)
+                ws.cell(row=je_row, column=target_col, value=None)
+            continue
+
         # Wenn die Spalte echte Konten-Daten hat (egal in welcher Ebene), sind
         # reine Aggregat-Gruppen (accounts=0, keine Subs, nur column_sum)
         # redundante Sichten derselben Werte (typisch BWA-Aggregate die
@@ -524,6 +564,53 @@ def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dic
     return out
 
 
+BWA_ENDWERT_NAME_PATTERNS = [
+    "vorläufiges ergebnis",
+    "vorläufiges jahresergebnis",
+    "vorläufiger jahresüberschuss",
+    "vorläufiger jahresfehlbetrag",
+    "vorläufiger gewinn",
+    "vorläufiger verlust",
+    "vorläufiges nettoergebnis",
+    "ergebnis nach steuern",
+    "jahresergebnis nach steuern",
+    "jahresüberschuss",
+    "jahresfehlbetrag",
+]
+
+
+def _find_bwa_endwert_row(groups: list[dict], group_sum_rows: dict[str, int],
+                          col_idx: int) -> int | None:
+    """Sucht in einer BWA-Spalte die "Endwert"-Top-Level-Gruppe (Vorläufiges
+    Ergebnis o.ä.) und gibt ihre Sum-Row zurück. Bevorzugt exakte Name-Matches
+    auf bekannte DATEV-/SKR-BWA-Endwertnamen, fällt auf fuzzy-substring zurück.
+
+    Voraussetzung: Die Gruppe hat einen column_sum für col_idx (sonst ergibt
+    der Endwert in dieser BWA-Spalte 0). Wenn nichts passt: None → JÜ-Zelle
+    bleibt leer (besser als falsche Aggregat-Summe).
+    """
+    def has_value(name: str) -> bool:
+        for g in groups:
+            if g["name"] == name:
+                cs = (g.get("column_sums") or {}).get(col_idx)
+                return isinstance(cs, (int, float))
+        return False
+
+    name_lc_to_orig: dict[str, str] = {
+        g["name"].lower(): g["name"] for g in groups
+    }
+    # Exakter Match auf eine der erwarteten Patterns
+    for pat in BWA_ENDWERT_NAME_PATTERNS:
+        if pat in name_lc_to_orig and has_value(name_lc_to_orig[pat]):
+            return group_sum_rows.get(name_lc_to_orig[pat])
+    # Fuzzy: Substring-Match
+    for pat in BWA_ENDWERT_NAME_PATTERNS:
+        for name_lc, name_orig in name_lc_to_orig.items():
+            if pat in name_lc and has_value(name_orig):
+                return group_sum_rows.get(name_orig)
+    return None
+
+
 def _apply_review_answers(groups: list[dict], questions: list[dict],
                           review_answers: dict) -> list[dict]:
     """Route accounts from open_questions into the user-chosen group."""
@@ -563,10 +650,19 @@ def _compute_excel_jue_per_column(groups: list[dict],
                                     columns: list[dict]) -> dict[int, float]:
     """Berechnet die numerische JUE pro Spalte parallel zur Excel-Formel,
     damit ein Build-Zeit-Cross-Check gegen pdf_jue moeglich ist.
-    Spiegelt die Logik der JE-Formel im Hauptbuilder (siehe _endwert_groups)."""
+    Spiegelt die Logik der JE-Formel im Hauptbuilder (siehe _endwert_groups).
+
+    BWA-Spalten: KEINE JÜ-Aggregation (Mehrfach-Zählung der BWA-Aggregat-
+    Top-Levels wie Rohertrag/Gesamtleistung/Betriebsergebnis). Wert wird in der
+    Excel direkt vom BWA-Endwert (Vorläufiges Ergebnis o.ä.) referenziert,
+    daher hier 0 — der pdf_jue_per_column-Cross-Check skippt BWA-Spalten
+    sowieso (pdf_v=None für BWA)."""
     out: dict[int, float] = {}
     formula_groups = _endwert_groups(groups)
     for col_idx, col in enumerate(columns):
+        if col.get("kind") == "bwa":
+            out[col_idx] = 0.0
+            continue
         conv = col.get("sign_convention", "expenses_negative")
         col_has_account_data = any(
             (acc.get("values") or {}).get(col_idx) is not None
@@ -585,26 +681,32 @@ def _compute_excel_jue_per_column(groups: list[dict],
             is_ja_native_position = has_own_col_sum and col.get("kind") == "ja"
             if col_has_account_data and is_bare_top_level and not is_ja_native_position:
                 continue
-            # Gruppen-Summe: eigene Konten + Konten der Sub-Gruppen wenn ein
-            # Top-Level mit eigenen accounts ist (HGB-Pattern). Sub-Gruppen
-            # einzeln im _endwert_groups-Output haben nur ihre eigenen Konten.
-            grp_sum = 0.0
+            # Gruppen-Summe: column_sum (pdf_sum_gj) ist authoritativ wenn
+            # gesetzt UND vom Konten-Sum abweicht (Bilanzbericht-Format:
+            # Konten teilweise gelistet, Rest implicit in der Summe). Sonst
+            # die Konten-Summe (+ Sub-Konten wenn Top-Level Parent).
+            acc_sum = 0.0
+            col_has_any_acc_value = False
             for acc in g.get("accounts", []):
                 v = acc.get("values", {}).get(col_idx)
                 if isinstance(v, (int, float)):
-                    grp_sum += v
+                    acc_sum += v
+                    col_has_any_acc_value = True
             if g.get("sub_group_of") is None:
                 for sub in groups:
                     if sub.get("sub_group_of") == g["name"]:
                         for acc in sub.get("accounts", []):
                             v = acc.get("values", {}).get(col_idx)
                             if isinstance(v, (int, float)):
-                                grp_sum += v
-            # BWA-Aggregat: Wert aus column_sums uebernehmen.
-            if grp_sum == 0.0 and not g.get("accounts"):
-                cs = (g.get("column_sums") or {}).get(col_idx)
-                if isinstance(cs, (int, float)):
-                    grp_sum = cs
+                                acc_sum += v
+                                col_has_any_acc_value = True
+            cs = (g.get("column_sums") or {}).get(col_idx)
+            if isinstance(cs, (int, float)) and (
+                    not col_has_any_acc_value or abs(cs - acc_sum) > 0.01):
+                # column_sum (pdf_sum_gj) authoritativ
+                grp_sum = cs
+            else:
+                grp_sum = acc_sum
             role = _resolve_role(g)
             if conv == "expenses_negative":
                 total += grp_sum
