@@ -252,13 +252,40 @@ cd "/Users/philippdegen/Documents/Claude/Calandi/Prozess-Übertrag"
 
 ### Deploy
 ```bash
-# Unit-Tests grün?
-.venv/bin/pytest
-# GitHub-Backup
-git push
-# Railway-Deploy
-railway up
+# Pre-Deploy-Gate: blockt railway up wenn pytest rot
+./bin/deploy.sh
 ```
+Das Skript läuft pytest → bei rot ABORT. Bei grün: prüft uncommitted changes,
+fragt nach Bestätigung wenn welche da sind, deployed dann via `railway up
+--detach`. **Niemals direkt `railway up` ohne pytest** — das umgeht den
+Production-Schutz.
+
+### Production-Acceptance — was MUSS eine ausgelieferte Excel haben
+
+Jeder Übertrag der live ausgeliefert wird, MUSS die folgenden Kriterien
+erfüllen (automatisch via `tests/test_end_to_end_robustness.py` geprüft —
+einer pro Pattern):
+
+| # | Kriterium | Automatisch geprüft durch |
+|---|-----------|---------------------------|
+| 1 | Excel wird gebaut (kein ValueError-Crash) | `_assert_excel_production_ready` |
+| 2 | Konten aus den hochgeladenen JAs sind sichtbar | dito |
+| 3 | Alle Gruppen-Sum-Zellen mit accounts = Formeln (`=SUM(...)` oder Kaskaden), niemals statische Werte | `test_alle_gruppen_sum_zellen_sind_formeln_kein_hardcoded_wert` |
+| 4 | JÜ-Cross-Check Excel ↔ PDF centgenau (Diff < 1ct) in jeder JA-Spalte | Cross-Check in `build_excel` + Fragen-Sheet-Eintrag |
+| 5 | Bei pdf_sum_gj != acc_sum: Restposten-Konto als Detail-Zeile sichtbar | `test_pattern_C_konten_unvollstaendig_restposten_ergaenzt` |
+| 6 | BWA-JÜ direkter Verweis auf BWA-Endwert (keine Aggregat-Doppelzählung) | `test_pattern_D_bwa_only_mit_endwert` |
+
+**Abgedeckte PDF-Format-Patterns** (alle in `test_end_to_end_robustness.py`):
+- A: Vollständiger Kontennachweis (Tasteone-Style)
+- B: DATEV-Rohergebnis-Format (Bilanzbericht, nur Gruppensummen)
+- C: Konten unvollständig → Restposten ergänzt
+- D: BWA-only mit Aggregat-Hierarchie (Vorläufiges Ergebnis als Endwert)
+- E: EÜR §4 Abs 3 mit Hinzurechnungen/Kürzungen
+- F: Multi-Year-Setup (3+ JAs, Cross-Year-Routing)
+
+**Neuer PDF-Stil aufgetaucht?** → neues Pattern als Test-Fixture in
+`test_end_to_end_robustness.py` ergänzen BEVOR der Fix deployed wird.
+Sonst kommt's beim nächsten Mandant zurück.
 
 ### Prompt anpassen
 1. `app/worker/prompts.py` ändern
