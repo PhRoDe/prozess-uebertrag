@@ -270,10 +270,17 @@ railway up
 
 ### Bug-Report empfangen ("Spalte X sieht falsch aus")
 
-Aus 5+2 Iterationen (April/Mai 2026) destillierter Standardablauf — verhindert
+Aus 5+2+3 Iterationen (April/Mai 2026) destillierter Standardablauf — verhindert
 Hypothesen-vor-Daten-Iterationen (siehe `~/.claude/rules/pipeline-engineering.md`
 Regel 5):
 
+0. **REGELN RE-LESEN** — vor jeder Code-Änderung in `app/excel/` oder
+   `app/worker/consolidate.py` zuerst den "Wichtige Regeln (nicht brechen)"-Block
+   in dieser CLAUDE.md komplett durchgehen. **Disziplin reicht nicht** — bei
+   20+ Regeln vergisst man unter Bug-Druck eine. Der PreToolUse-Hook
+   `.claude/hooks/builder-rules-reminder.sh` druckt die Regeln automatisch vor
+   jedem Edit; ignorieren = Selbst-Sabotage. Frage explizit: **"Welche dieser
+   Regeln könnte mein geplanter Fix verletzen?"** Wenn unsicher: nochmal lesen.
 1. **Daten ziehen** — User um die problematische Excel + die zugehörigen PDFs
    bitten. Ohne echte Daten nicht raten.
 2. **Symptom in der Excel präzise dokumentieren** — welcher Konto-Wert weicht
@@ -291,10 +298,18 @@ Regel 5):
    triggern (siehe Tasteone-Synthetic-Parent-Bug 2026-05).
 6. **Commit + Deploy**: `git push && railway up`. Build-Logs checken
    (`railway logs --build`).
+7. **POST-FIX-CHECK**: `pytest` muss grün sein UND der Regel-Enforcement-Test
+   `test_alle_gruppen_sum_zellen_sind_formeln_kein_hardcoded_wert` muss bestanden
+   sein. Wenn er rot ist: eine "Formel statt Wert"-Regel wurde verletzt — Fix
+   überarbeiten (Restposten-Approach statt direkter Wert).
 
 > [!warning]
 > NIE Code anfassen bevor man die echten Roh-Daten gesehen hat. Jede
 > Hypothese-vor-Daten-Iteration kostet einen User-Roundtrip.
+>
+> NIE eine "nicht brechen"-Regel umgehen weil der Fix dadurch schneller wäre.
+> Wenn die Regel im Weg steht, ist entweder der Fix falsch oder die Regel muss
+> diskutiert + geändert werden — aber NICHT stillschweigend gebrochen.
 
 ## Offene Punkte (TODO)
 

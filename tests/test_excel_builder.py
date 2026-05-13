@@ -465,6 +465,53 @@ def test_bwa_jue_uses_bwa_endwert_not_aggregate_sum():
         f"Vermutlich Aggregat-Doppelzählung wieder eingeführt."
 
 
+def test_alle_gruppen_sum_zellen_sind_formeln_kein_hardcoded_wert():
+    """CLAUDE.md-Regel-Enforcement: 'Alle Excel-Zwischensummen MÜSSEN Formeln
+    sein (=SUM(...) oder Kaskaden). Niemals hardcoded Werte.'
+
+    Scannt nach build_excel jede Gruppen-Sum-Zelle (= Top-Level UND Sub-Group)
+    in jeder JA-Spalte: Wert MUSS String sein und mit '=' beginnen — oder
+    None (Parent-ohne-children-but-with-children-Pattern bevor Pass 2). Numeric
+    Werte in Gruppen-Sum-Zellen sind verboten.
+
+    Bilanzbericht-Format-Edge-Case: Wenn eine Gruppe accounts hat und
+    pdf_sum_gj != acc_sum, muss ein Restposten-Konto ergänzt werden — die
+    Sum-Zelle bleibt Formel. NICHT column_sum direkt schreiben (Live-Bug
+    2026-05-13).
+
+    AUSNAHME: BWA-Spalten (kind='bwa') dürfen für Aggregat-Gruppen ohne
+    accounts und ohne children einen direkten Wert haben (BWA-Aggregate
+    haben oft keine Hierarchie); aber für Gruppen MIT accounts gilt auch
+    hier die Formel-Pflicht.
+    """
+    # Stelle Bilanzbericht-Edge-Case nach: column_sum != acc_sum
+    data = {
+        "columns": [
+            {"label": "2024", "kind": "ja", "year": 2024,
+             "sign_convention": "expenses_positive"},
+        ],
+        "groups": [
+            {"name": "Aufwendungen", "type": "aufwand", "sub_group_of": None,
+             "gkv_section": "sonst_betr_aufw",
+             # column_sum WEICHT von acc_sum (1000) AB → vorher Bug: Direktwert,
+             # jetzt: Restposten ergänzt, Sum-Zelle bleibt Formel
+             "column_sums": {0: 5000},
+             "accounts": [{"konto_nr": "6300", "bezeichnung": "Test",
+                            "values": {0: 1000}, "confidence": "high"}]},
+        ],
+        "questions": [],
+    }
+    xlsx = build_excel(data)
+    ws = _ws(xlsx)
+    aufw_row = _find_row(ws, "Aufwendungen")
+    cell_val = ws.cell(aufw_row, 3).value
+    assert isinstance(cell_val, str) and cell_val.startswith("="), (
+        f"REGEL VERLETZT: Gruppen-Sum-Zelle muss Formel sein, ist "
+        f"{cell_val!r} (Typ {type(cell_val).__name__}). "
+        f"CLAUDE.md-Regel: 'Alle Excel-Zwischensummen MÜSSEN Formeln sein'."
+    )
+
+
 def test_bwa_jue_leer_wenn_kein_endwert_erkennbar():
     """Wenn die BWA-Daten keinen erkennbaren Endwert-Namen ("Vorläufiges
     Ergebnis" o.ä.) haben, bleibt die JÜ-Zelle der BWA-Spalte leer — besser
