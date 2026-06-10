@@ -417,6 +417,10 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 ✅ 0. Deploy-Key eintragen (erledigt 2026-06-10; Repo war schon privat)
    1. Supabase-Service-Key rotieren → neue Secrets via 1Password an Thomas/Leon
    2. Leon klont das Repo über den Deploy-Key (morgen)
+   2b. ⚠️ VOR dem ersten Push: `"Bash(git push:*)"` aus dem `deny`-Block in
+       `.claude/settings.json` entfernen — sonst blockt das Sicherheitsnetz
+       jeden Push (bypassPermissions-Setup, wie Nylo). Erst dann kann der
+       Webhook über einen Push getriggert werden.
    3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
    4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
    5. Auth-Patch mergen (Login raus) — NICHT vorher (Stoppschild 1)
