@@ -1,7 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3:*)",
       "Bash(cat:*)",
       "Bash(ls:*)",
       "Bash(cd:*)",
@@ -15,7 +14,6 @@
       "Bash(head:*)",
       "Bash(tail:*)",
       "Bash(jq:*)",
-      "Bash(curl:*)",
       "Bash(mkdir:*)",
       "Read",
       "Write",
@@ -24,6 +22,10 @@
       "Grep",
       "WebFetch",
       "WebSearch"
+    ],
+    "ask": [
+      "Bash(python3:*)",
+      "Bash(curl:*)"
     ],
     "deny": [
       "Bash(rm -rf:*)",
