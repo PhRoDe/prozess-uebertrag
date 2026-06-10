@@ -26,7 +26,7 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
 | Host | Railway | Hetzner, Docker-Container hinter nginx (intern Port 8000) |
 | Deploy | `railway up` (Alt) | `git push` auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild |
 | Auth | eigenes Passwort-Gate | **Authentik Forward-Auth** (nginx), Identität via Header |
-| Code-Repo | https://github.com/PhRoDe/prozess-uebertrag | wird privat (read-only Deploy-Key) |
+| Code-Repo | https://github.com/PhRoDe/prozess-uebertrag (privat) | privat, read-only Deploy-Key `calandi-server` eingetragen (2026-06-10) |
 | Supabase | Projekt `prozess-uebertrag` (Frankfurt) | unverändert |
 | Team-Passwort | `TEAM_CREDENTIALS.local.md` (gitignored) | entfällt mit Authentik |
 
@@ -404,10 +404,12 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 > hängt.** Solange sie offen auf Railway erreichbar ist, würde das Entfernen
 > des Passwort-Gates sie ungeschützt ins Netz stellen.
 
-> [!warning]
-> **2. Deploy-Key ZUERST eintragen, DANN Repo auf privat.** Sonst bricht der
-> Deploy (bei „memorandum" genau so passiert). Read-only Public-Key von
-> Thomas/Leon unter GitHub → Settings → Deploy keys.
+> [!note]
+> **2. ✅ ERLEDIGT (2026-06-10): Read-only Deploy-Key `calandi-server`
+> eingetragen.** Das Repo war ohnehin **schon privat** (entgegen Thomas'
+> Annahme, es sei noch öffentlich) — es gibt kein „auf privat schalten" mehr.
+> Leon klont morgen über genau diesen read-only Key (per SSH); ein
+> Public-Clone funktioniert nicht. Thomas wurde informiert.
 
 > [!danger]
 > **3. Supabase-Service-Key VOR der Secret-Übergabe rotieren.** Der alte Key
@@ -435,12 +437,13 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 ### Cutover-Reihenfolge
 
 ```
-1. Supabase-Service-Key rotieren → neue Secrets via 1Password an Thomas/Leon
-2. Deploy-Key eintragen → dann Repo auf privat
-3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
-4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
-5. Auth-Patch mergen (Login raus) — NICHT vorher (Stoppschild 1)
-6. Railway abschalten
+✅ 0. Deploy-Key eintragen (erledigt 2026-06-10; Repo war schon privat)
+   1. Supabase-Service-Key rotieren → neue Secrets via 1Password an Thomas/Leon
+   2. Leon klont das Repo über den Deploy-Key (morgen)
+   3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
+   4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
+   5. Auth-Patch mergen (Login raus) — NICHT vorher (Stoppschild 1)
+   6. Railway abschalten
 ```
 
 ## Offene Punkte (TODO)

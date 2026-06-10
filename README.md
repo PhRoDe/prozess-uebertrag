@@ -143,12 +143,13 @@ Ziel: App läuft als Docker-Container auf dem Calandi-Hetzner hinter nginx
 git push main (GitHub)  →  Webhook …/hooks/deploy-uebertrag  →  Container-Rebuild
 ```
 
-Server-Setup (Container, nginx/Authentik, Env-Vars, Webhook, read-only
-Deploy-Key) macht die Calandi-Infra (Thomas/Leon), nicht dieses Repo. Alle
-ENV-Vars aus `.env.example` müssen server-seitig gesetzt sein (inkl.
-`PUBLIC_BASE_URL=https://uebertrag.calandi-tools.de`). Übergabe der Secrets
-über 1Password. Cutover-Reihenfolge + Sicherheits-Stopps: `CLAUDE.md`,
-Abschnitt "Migration auf Calandi-Tools".
+Server-Setup (Container, nginx/Authentik, Env-Vars, Webhook) macht die
+Calandi-Infra (Thomas/Leon), nicht dieses Repo. Der read-only Deploy-Key
+`calandi-server` ist bereits eingetragen (2026-06-10), das Repo ist privat —
+Leon klont darüber. Alle ENV-Vars aus `.env.example` müssen server-seitig
+gesetzt sein (inkl. `PUBLIC_BASE_URL=https://uebertrag.calandi-tools.de`).
+Übergabe der Secrets über 1Password. Cutover-Reihenfolge + Sicherheits-Stopps:
+`CLAUDE.md`, Abschnitt "Migration auf Calandi-Tools".
 
 ### 4. Health-Check
 
