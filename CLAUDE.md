@@ -54,6 +54,18 @@ cp .env.example .env
 Voraussetzungen: Python 3.12+. Nach dem Cutover ist kein Railway-CLI mehr
 nötig — Deploy läuft dann über GitHub-Push + Webhook (siehe oben).
 
+### Claude-Code-Setup (`.claude/settings.json`)
+
+`defaultMode: bypassPermissions` (wie Nylo) — Tools laufen ohne Rückfrage. Mit
+zwei Schutzschichten:
+- **`ask`** (prompten trotz Bypass): `python3`, `curl` (Exec-/Netzwerk-Primitive,
+  Security-Review). `.venv/bin/python3` + `.venv/bin/pytest` fangen mit `.venv/`
+  an → **nicht** betroffen, laufen ohne Prompt.
+- **`deny`** (immer blockiert): `rm -rf`, `git push`, `git reset --hard`.
+  ⚠️ `git push` ist bewusst geblockt bis zum Cutover — vor dem ersten Push aus
+  `deny` entfernen (siehe Cutover-Schritt 2b). Deny ist prefix-basiert, also
+  Leitplanke gegen Versehen, kein dichter Riegel.
+
 ## Architektur in einem Satz
 
 FastAPI-Monolith im Docker-Container (in Migration: Railway → Calandi-Hetzner
