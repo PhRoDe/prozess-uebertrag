@@ -4,8 +4,8 @@ Good enough for an internal tool with a single server process. Keeps a deque
 of timestamps per key and rejects when more than `max_hits` have occurred
 within `window_seconds`.
 
-Not distributed — if we ever scale to multiple Railway replicas, replace with
-a Supabase-backed counter or Redis.
+Not distributed — if we ever scale to multiple replicas/containers, replace
+with a Supabase-backed counter or Redis.
 """
 from collections import defaultdict, deque
 from threading import Lock
@@ -20,7 +20,7 @@ _lock = Lock()
 def client_ip(request: Request) -> str:
     """Extract the real client IP.
 
-    Behind Railway's Fastly/edge proxy, `request.client.host` is the proxy's IP
+    Behind the reverse proxy, `request.client.host` is the proxy's IP
     (same for all clients → rate-limiter useless). Prefer X-Forwarded-For, fall
     back to a global bucket if the header is missing.
     """

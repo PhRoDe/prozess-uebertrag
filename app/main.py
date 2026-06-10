@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Fix 1A: beim App-Start hängende Jobs aufnehmen (Railway-Deploy-Überlebenspfad)
+    # Fix 1A: beim App-Start hängende Jobs aufnehmen (Deploy-Restart-Überlebenspfad)
     try:
         resume_stuck_jobs()
     except Exception as e:

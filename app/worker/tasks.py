@@ -2,7 +2,7 @@
 
 Idempotent + claim-based:
 - Doppelte Aufrufe gleicher Job-ID machen kein Doppel-Request an Claude (Fix 1D)
-- Konkurrierende Worker (z.B. nach Railway-Deploy-Restart) treten sich nicht
+- Konkurrierende Worker (z.B. nach einem Deploy-Restart) treten sich nicht
   auf die Füße — nur der erste try_claim gewinnt (Fix 1A)
 """
 import logging
@@ -144,7 +144,7 @@ def finalize_job(job_id: str, review_answers: dict) -> None:
 
 def resume_stuck_jobs() -> None:
     """Fix 1A: at app-start, find jobs stuck in 'extracting' or 'finalizing'
-    whose processing_node is stale (worker was killed by Railway deploy)
+    whose processing_node is stale (worker was killed by a deploy restart)
     and re-run them."""
     repo = JobsRepo()
     try:

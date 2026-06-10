@@ -27,7 +27,7 @@ def login_page(request: Request):
 @router.post("/login")
 def login_submit(request: Request, password: str = Form(...)) -> Response:
     # Fix: Brute-Force-Schutz, 10 Versuche pro 15 min pro IP
-    # Railway proxies requests through Fastly — X-Forwarded-For is the real client
+    # Behind the reverse proxy — X-Forwarded-For carries the real client IP
     ip = client_ip(request)
     if not rate_allow(f"login:{ip}", max_hits=10, window_seconds=900):
         raise HTTPException(status_code=429,

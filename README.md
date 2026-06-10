@@ -4,7 +4,9 @@ Interne Calandi-Web-App: Jahresabschluss-, BWA- und Susa-PDFs per
 Drag-and-Drop hochladen, Claude extrahiert die Konten, Output ist eine
 Excel die die Gliederung der Original-PDF 1:1 übernimmt.
 
-**Live:** https://prozess-uebertrag-production.up.railway.app
+**Live:** aktuell noch auf Railway; **Migration auf
+https://uebertrag.calandi-tools.de** (Hetzner + Authentik) läuft —
+siehe `CLAUDE.md`, Abschnitt "Migration auf Calandi-Tools".
 
 Siehe `CLAUDE.md` für die Entwickler-Perspektive,
 `docs/specs/2026-04-23-prozess-uebertrag-design.md` für das Design.
@@ -115,6 +117,10 @@ docker compose up --build
 
 ### 2. Team-Passwort generieren
 
+> **Migration:** Entfällt nach dem Hetzner-Cutover — Auth übernimmt dann
+> **Authentik** (nginx Forward-Auth), das eigene Passwort-Gate
+> (`APP_PASSWORD_HASH`) wird per Patch entfernt. Bis dahin gilt das Folgende.
+
 ```bash
 .venv/bin/python3 -c "
 import secrets, string, bcrypt
@@ -125,25 +131,29 @@ print('SESSION_SECRET=', secrets.token_hex(32))
 "
 ```
 
-Passwort an Team weitergeben, Hash + Secret als Railway-Env setzen.
+Passwort an Team weitergeben, Hash + Secret als Server-Env (bzw.
+GitHub-Secret) setzen.
 
-### 3. Railway
+### 3. Server (Calandi-Hetzner, Docker) — in Migration
 
-```bash
-# einmaliges Setup
-railway login
-railway init   # Projekt anlegen
-railway variables --set KEY=VALUE ...  # alle ENV-Vars aus .env
-railway up     # Deploy
-railway domain # Public-URL generieren
-railway variables --set PUBLIC_BASE_URL=https://…  # Public-URL eintragen
-railway up     # Re-Deploy mit Secure-Cookie
+Ziel: App läuft als Docker-Container auf dem Calandi-Hetzner hinter nginx
+(Authentik Forward-Auth) unter `uebertrag.calandi-tools.de`. Deploy:
+
 ```
+git push main (GitHub)  →  Webhook …/hooks/deploy-uebertrag  →  Container-Rebuild
+```
+
+Server-Setup (Container, nginx/Authentik, Env-Vars, Webhook, read-only
+Deploy-Key) macht die Calandi-Infra (Thomas/Leon), nicht dieses Repo. Alle
+ENV-Vars aus `.env.example` müssen server-seitig gesetzt sein (inkl.
+`PUBLIC_BASE_URL=https://uebertrag.calandi-tools.de`). Übergabe der Secrets
+über 1Password. Cutover-Reihenfolge + Sicherheits-Stopps: `CLAUDE.md`,
+Abschnitt "Migration auf Calandi-Tools".
 
 ### 4. Health-Check
 
 ```bash
-curl https://deine-railway-url/health
+curl https://uebertrag.calandi-tools.de/health   # nach Cutover
 # {"status":"ok"}
 ```
 
@@ -167,16 +177,23 @@ project" klicken, 1-2 Minuten warten, dann läuft alles wieder.
 
 ## Projekt-Update-Workflow
 
+Seit 2026-06-10: Deploy = Push auf GitHub. Der Webhook zieht den Stand
+automatisch auf den Calandi-Server.
+
 ```bash
 # Änderungen machen, Tests grün bekommen
 .venv/bin/pytest
 
-# Backup + Historie auf GitHub
+# Push = Deploy (Webhook zieht auf den Server)
 git add . && git commit -m "…" && git push
 
-# Deploy auf Railway
-railway up
+# bequemer: Pre-Push-Gate (läuft pytest, pusht nur bei grün)
+./bin/deploy.sh
 ```
+
+Solo-Entwicklung: `./bin/deploy.sh` (pytest grün → push) reicht als Schutz,
+Direkt-Push auf `main` ist OK. Eine PR-/Branch-Protection-Pflicht braucht es
+erst, wenn ein zweiter Entwickler dazukommt.
 
 ## Wichtige Regeln (für weitere Entwicklung)
 

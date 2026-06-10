@@ -13,13 +13,27 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
 
 ## Wo es läuft
 
-| Was | Wo |
-|---|---|
-| Live-App | https://prozess-uebertrag-production.up.railway.app |
-| Code-Repo | https://github.com/PhRoDe/prozess-uebertrag (private) |
-| Deploy | Railway, `railway up` aus dem Projektordner |
-| Supabase | Projekt `prozess-uebertrag` (Frankfurt) |
-| Team-Passwort | siehe `TEAM_CREDENTIALS.local.md` (gitignored) |
+> [!warning]
+> **Migration läuft (Stand 2026-06-10).** Die App zieht von **Railway** auf
+> den **Calandi-Hetzner** (Docker-Container hinter nginx + Authentik). Bis der
+> Hetzner-Stand verifiziert grün ist, ist **Railway weiter der Live-Host**.
+> Cutover-Reihenfolge + offene Punkte siehe Abschnitt **"Migration auf
+> Calandi-Tools (Hetzner + Authentik)"** unten.
+
+| Was | Aktuell (Railway) | Ziel (Hetzner/Calandi-Tools) |
+|---|---|---|
+| Live-App | Railway-URL (noch aktiv) | https://uebertrag.calandi-tools.de |
+| Host | Railway | Hetzner, Docker-Container hinter nginx (intern Port 8000) |
+| Deploy | `railway up` (Alt) | `git push` auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild |
+| Auth | eigenes Passwort-Gate | **Authentik Forward-Auth** (nginx), Identität via Header |
+| Code-Repo | https://github.com/PhRoDe/prozess-uebertrag | wird privat (read-only Deploy-Key) |
+| Supabase | Projekt `prozess-uebertrag` (Frankfurt) | unverändert |
+| Team-Passwort | `TEAM_CREDENTIALS.local.md` (gitignored) | entfällt mit Authentik |
+
+**Ziel-Deploy-Workflow (nach Cutover):** Entwickeln lokal → `git push` auf
+`main` → GitHub-Actions-CI läuft → Webhook triggert den Container-Rebuild auf
+Hetzner. GitHub ist die einzige Quelle der Wahrheit, der Server folgt
+automatisch. Bis dahin gilt für Live noch Railway.
 
 ## Erstes Setup (neue Sessions / Team-Mitglieder)
 
@@ -37,12 +51,14 @@ cp .env.example .env
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 ```
 
-Voraussetzungen: Python 3.12+, Railway-CLI nur fürs Deployen (`brew install railway`).
+Voraussetzungen: Python 3.12+. Nach dem Cutover ist kein Railway-CLI mehr
+nötig — Deploy läuft dann über GitHub-Push + Webhook (siehe oben).
 
 ## Architektur in einem Satz
 
-FastAPI-Monolith auf Railway, HTMX-UI mit Tailwind-CDN, Claude-API für PDF-Extraktion,
-Supabase für Storage+Postgres, alles in einem Python-Container.
+FastAPI-Monolith im Docker-Container (in Migration: Railway → Calandi-Hetzner
+hinter nginx/Authentik), HTMX-UI mit Tailwind-CDN, Claude-API für
+PDF-Extraktion, Supabase für Storage+Postgres, alles in einem Python-Container.
 
 ### Datenfluss
 
@@ -149,7 +165,7 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
 | `app/routes/upload.py` | PDF-Upload, Rate-Limit, Filename-Sanitize |
 | `app/routes/job.py` | Status-Polling, Review-Screen, Finalize |
 | `app/worker/tasks.py` | Background-Orchestrator, Idempotent + Claim-Pattern |
-| `app/ratelimit.py` | In-Memory-Limiter, X-Forwarded-For-aware (hinter Railways Proxy) |
+| `app/ratelimit.py` | In-Memory-Limiter, X-Forwarded-For-aware (hinter Reverse-Proxy) |
 
 ## Wichtige Regeln (nicht brechen)
 
@@ -222,8 +238,10 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
   - `group_sum_mismatch`: Konten-Summe ist authoritativ über `pdf_sum_gj`
     (Claude erfindet den manchmal via Übertrag-Doppelzählung). Kein Eintrag.
   - `unmatched_account` bleibt im Fragen-Sheet — echte User-Entscheidung.
-- **Sensitive Daten nie in stdout/Bash-Output**: `railway variables` zeigt alles
-  Klartext — niemals das Output anzeigen. Nur Namen, nicht Werte.
+- **Sensitive Daten nie in stdout/Bash-Output**: Env-Vars (ANTHROPIC_API_KEY,
+  SUPABASE_SERVICE_KEY etc.) liegen auf dem Server bzw. in GitHub-Secrets —
+  niemals Klartext-Werte ins Bash-Output oder in Commits ziehen. Nur Namen,
+  nicht Werte.
 - **Keine HGB-Normalisierung der Reihenfolge**: Wenn eine PDF "Raumkosten" als
   Hauptgruppe zeigt, bleibt das so. Aber gkv_section bringt die semantische
   Standardisierung dazu.
@@ -251,14 +269,43 @@ cd "/Users/philippdegen/Documents/Claude/Calandi/Prozess-Übertrag"
 ```
 
 ### Deploy
+
+> [!warning]
+> **Während der Migration:** Der Hetzner-Webhook ist noch nicht final
+> verifiziert. Bis Hetzner grün ist, läuft Live noch auf Railway. Erst nach
+> bestätigtem Cutover (siehe "Migration auf Calandi-Tools") ist `git push` =
+> Live-Deploy.
+
+Ziel-Deploy = **Push auf `main`**. Der Webhook (`…/hooks/deploy-uebertrag`)
+triggert den Container-Rebuild auf Hetzner. Kein `railway up`, kein manueller
+Server-Zugriff.
+
 ```bash
-# Pre-Deploy-Gate: blockt railway up wenn pytest rot
+# Lokales Pre-Push-Gate: blockt den Push wenn pytest rot
 ./bin/deploy.sh
 ```
 Das Skript läuft pytest → bei rot ABORT. Bei grün: prüft uncommitted changes,
-fragt nach Bestätigung wenn welche da sind, deployed dann via `railway up
---detach`. **Niemals direkt `railway up` ohne pytest** — das umgeht den
-Production-Schutz.
+fragt nach Bestätigung wenn welche da sind, **pusht dann auf GitHub** (`git
+push`). Der Push triggert die GitHub-Actions-CI **und** den Deploy-Webhook.
+
+**Niemals pushen ohne grünes pytest** — das umgeht den Production-Schutz und
+schiebt kaputten Code direkt auf die Live-App.
+
+**Single-Developer-Setup:** Es entwickelt **nur der Owner** an dieser App
+(andere Personen *nutzen* sie nur über das Calandi-Tools-Portal — laden PDFs
+hoch, entwickeln nicht). Darum ist das lokale `./bin/deploy.sh`-Gate der
+Deploy-Schutz und **Branch Protection / PR-Pflicht ist NICHT nötig** —
+Direkt-Push auf `main` ist hier in Ordnung. Disziplin: nie pushen ohne grünes
+pytest (das macht `./bin/deploy.sh` automatisch).
+
+> Branch-Protection (Feature-Branch → PR → Required Check `Test / pytest` →
+> Merge → Deploy) wäre erst relevant, wenn ein **zweiter Entwickler** dazukommt.
+> Dann schützt es davor, dass jemand ungetesteten Code direkt live pusht.
+> Solange Solo: weglassen, ist nur Overhead.
+
+Wichtig bleibt — *weil* andere die App nutzen — die Robustheits-Schichten
+(Tests, Cross-Checks, Pattern-Fixtures, Restposten). Die fangen exotische
+PDFs ab, nicht exotische Entwickler.
 
 ### Production-Acceptance — was MUSS eine ausgelieferte Excel haben
 
@@ -323,8 +370,9 @@ Regel 5):
 5. **Live-Smoketest mit ALLEN relevanten PDFs** — nicht nur dem
    problematischen Jahr. Multi-Jahr-Konstellationen können neue Bugs
    triggern (siehe Tasteone-Synthetic-Parent-Bug 2026-05).
-6. **Commit + Deploy**: `git push && railway up`. Build-Logs checken
-   (`railway logs --build`).
+6. **Commit + Deploy**: `git push` (oder `./bin/deploy.sh` mit Pre-Push-Gate).
+   Der Webhook zieht den Stand auf den Server. Danach Live-Check auf
+   `https://uebertrag.calandi-tools.de/health` (sollte `{"status":"ok"}`).
 7. **POST-FIX-CHECK**: `pytest` muss grün sein UND der Regel-Enforcement-Test
    `test_alle_gruppen_sum_zellen_sind_formeln_kein_hardcoded_wert` muss bestanden
    sein. Wenn er rot ist: eine "Formel statt Wert"-Regel wurde verletzt — Fix
@@ -338,13 +386,71 @@ Regel 5):
 > Wenn die Regel im Weg steht, ist entweder der Fix falsch oder die Regel muss
 > diskutiert + geändert werden — aber NICHT stillschweigend gebrochen.
 
+## Migration auf Calandi-Tools (Hetzner + Authentik)
+
+Stand 2026-06-10, koordiniert mit Thomas & Leon (Calandi-Infra). Quelle:
+`Downloads/2026-06-10-an-philipp-umbau-container-authentik.md`.
+
+**Zielbild:** App läuft als Docker-Container auf dem Calandi-Hetzner hinter
+nginx. nginx macht **Authentik Forward-Auth**; die App bekommt die Identität
+über Header `X-Authentik-Username` / `-Email` / `-Groups`. Erreichbar unter
+`https://uebertrag.calandi-tools.de` (Portal-Login, App-Auswahl). Deploy:
+Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
+
+### Sicherheits-Stoppschilder (nicht überspringen)
+
+> [!danger]
+> **1. Login-Code erst entfernen, wenn die App NUR noch hinter Authentik
+> hängt.** Solange sie offen auf Railway erreichbar ist, würde das Entfernen
+> des Passwort-Gates sie ungeschützt ins Netz stellen.
+
+> [!warning]
+> **2. Deploy-Key ZUERST eintragen, DANN Repo auf privat.** Sonst bricht der
+> Deploy (bei „memorandum" genau so passiert). Read-only Public-Key von
+> Thomas/Leon unter GitHub → Settings → Deploy keys.
+
+> [!danger]
+> **3. Supabase-Service-Key VOR der Secret-Übergabe rotieren.** Der alte Key
+> wurde 2026-04-24 geleakt (Railway-Variables) und nie rotiert. Nicht den
+> kompromittierten Key in die Hetzner-`.env` geben. **Runbook:**
+> `docs/runbooks/2026-06-10-supabase-key-rotation.md` (Schritt-für-Schritt,
+> Consumer-Liste, Option A = neuer `sb_secret_`-Key zero-downtime).
+
+### Auth-Umbau (Login → Authentik)
+
+- Eigenes Passwort-Gate / Session-Login wird entfernt; `APP_PASSWORD_HASH`
+  und das Gate-`SESSION_SECRET` entfallen. **Offen:** ob `SESSION_SECRET`
+  sonst noch gebraucht wird (Thomas listet es doppelt — klären).
+- Falls die App den User braucht: aus den `X-Authentik-*`-Headern lesen.
+- **Umsetzung:** Thomas/Leon liefern einen fertigen Patch/Diff → Owner
+  reviewt, merged, testet. (Nicht selbst bauen — Risiko des „offen im Netz"-
+  Fallstricks ist zu hoch.) Bleibt Owner-Code.
+
+### Secrets server-seitig (Container-`.env`, NIE ins Repo)
+
+`ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `PUBLIC_BASE_URL`
+(`=https://uebertrag.calandi-tools.de`), ggf. `SESSION_SECRET`. Übergabe über
+**1Password** (Vault „Calandi/Prozess-Uebertrag"), nicht per Mail/Chat-Text.
+
+### Cutover-Reihenfolge
+
+```
+1. Supabase-Service-Key rotieren → neue Secrets via 1Password an Thomas/Leon
+2. Deploy-Key eintragen → dann Repo auf privat
+3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
+4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
+5. Auth-Patch mergen (Login raus) — NICHT vorher (Stoppschild 1)
+6. Railway abschalten
+```
+
 ## Offene Punkte (TODO)
 
-- **Supabase-Service-Key wurde nicht rotiert** (siehe Chat-Historie vom
-  2026-04-24 — Railway-Variables-Leak). **Vor dem ersten echten Deal-Upload
-  rotieren.**
-- **Rate-Limit ist In-Memory per Container** — bei Railway-Multi-Replica
-  funktioniert das nicht mehr. Aktuell OK weil single-replica.
+- **Supabase-Service-Key VOR Hetzner-Cutover rotieren** (geleakt 2026-04-24,
+  Railway-Variables). Runbook: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
+  Blockiert die Secret-Übergabe an Calandi-Infra. Erwägen: auch
+  `ANTHROPIC_API_KEY` + `SESSION_SECRET` rotieren (waren im selben Leak).
+- **Rate-Limit ist In-Memory per Container** — bei Multi-Replica/Multi-Container
+  funktioniert das nicht mehr. Aktuell OK weil Single-Container.
 - **Phase 3 (festes GKV-Layout in §275-Reihenfolge)**: nicht umgesetzt, weil
   bei DATEV-Standard ohnehin die PDF-Reihenfolge der GKV-Reihenfolge
   entspricht. Bei exotischen STBs könnte ein erzwungenes GKV-Layout später
