@@ -421,6 +421,9 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
    4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
    5. Auth-Patch mergen (Login raus) — NICHT vorher (Stoppschild 1)
    6. Railway abschalten
+   7. AUFRÄUMEN: diese „Migration"-Sektion + Railway-Erwähnungen aus CLAUDE.md
+      in docs/runbooks/ auslagern (3-Zeilen-Pointer behalten) → spart ~60
+      Zeilen in der immer-geladenen CLAUDE.md. Erst NACH bestätigtem Cutover.
 ```
 
 ## Offene Punkte (TODO)
