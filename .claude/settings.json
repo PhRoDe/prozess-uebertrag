@@ -29,7 +29,12 @@
     ],
     "deny": [
       "Bash(rm -rf:*)",
-      "Bash(git reset --hard:*)"
+      "Bash(git reset --hard:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push --mirror:*)",
+      "Bash(git push --delete:*)"
     ],
     "defaultMode": "bypassPermissions"
   },
