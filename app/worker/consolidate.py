@@ -293,8 +293,17 @@ def _ingest_ja(doc: dict, col_idx: int, year: int, groups_by_name: dict,
             unrouted = [acc for acc in accs
                          if not (acc.get("konto_nr") and
                                  str(acc["konto_nr"]) in nr_to_group)]
-            if unrouted:
-                # Es gibt Konten ohne bekannten Anker -> Gruppe muss angelegt werden
+            # Auch Summen-only-GuV-Positionen (accs=0, nur pdf_sum) brauchen eine
+            # eigene Gruppe — sonst faellt ihr Wert still raus, wenn der juengste
+            # JA (Template-Quelle) die Position nicht hat (z.B. Zinsaufwand=0 ->
+            # von Claude weggelassen). Real: Prisma JA2022/2023 Zinsaufwand
+            # 763,69 / VJ 430,40 -> JUE sonst um genau diesen Betrag zu hoch.
+            has_guv_summary = (
+                (g.get("pdf_sum_gj") is not None or g.get("pdf_sum_vj") is not None)
+                and gsection and gsection != "neutral"
+            )
+            if unrouted or has_guv_summary:
+                # Konten ohne Anker ODER GuV-Summen-Position -> Gruppe anlegen
                 target_name = gname
                 new_tpl = {
                     "name": gname,

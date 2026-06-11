@@ -54,6 +54,33 @@ def test_ja_account_values_populated():
     assert acc["values"][1] == 1000000  # aus betrag_gj
 
 
+def test_summary_only_position_missing_in_newest_ja_not_dropped():
+    """Regression Prisma 2026-06 / Fehler 2: Der jüngste JA (2024) hat keine
+    'Zinsen und ähnliche Aufwendungen'-Position (war 0 → von Claude weggelassen),
+    ein älterer JA (2023) liefert sie als Summen-only-Position (accs=0, nur
+    pdf_sum). Da das Template aus dem jüngsten JA gebaut wird und _ingest_ja eine
+    neue Gruppe bisher NUR bei unrouted-Konten anlegt, fiel der Wert (763,69 / VJ
+    430,40) still raus → fehlte in der JÜ-Formel. Muss erhalten bleiben.
+    """
+    doc23 = _ja(2023, 2022, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 900000, 800000)],
+             gkv_section="umsatzerloese"),
+        _grp("9. Zinsen und ähnliche Aufwendungen", "aufwand", [],
+             pdf_sum_gj=763.69, pdf_sum_vj=430.40, gkv_section="zinsaufwand"),
+    ])
+    doc24 = _ja(2024, 2023, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 1000000, 900000)],
+             gkv_section="umsatzerloese"),
+    ])
+    r = merge_extractions([doc23, doc24])
+    col = {r["columns"][i]["year"]: i for i in range(len(r["columns"]))}
+    zins = [g for g in r["groups"] if g.get("gkv_section") == "zinsaufwand"]
+    assert zins, "Zinsaufwand aus dem älteren JA darf nicht gedroppt werden"
+    cs = zins[0]["column_sums"]
+    assert cs.get(col[2023]) == 763.69, "GJ-Wert von JA2023 fehlt"
+    assert cs.get(col[2022]) == 430.40, "VJ-Wert (2022) von JA2023 fehlt"
+
+
 def test_multi_year_ja_matches_accounts_by_konto_nr():
     doc23 = _ja(2023, 2022, [
         _grp("Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse 19%", 900000, 800000)]),
