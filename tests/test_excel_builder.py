@@ -2,7 +2,7 @@ import io
 import json
 import pytest
 from openpyxl import load_workbook
-from app.excel.builder import build_excel
+from app.excel.builder import build_excel, _inject_restposten_accounts
 
 
 def _sample(sign="expenses_negative", with_bwa=False):
@@ -95,6 +95,86 @@ def test_bwa_sum_when_acc_sum_differs_from_pdf_sum_via_restposten():
     # Restposten 2023 (Spalte 3) = pdf_sum_gj - acc_sum, hier 0 weil cs gleich acc
     # Restposten 2025 (Spalte 5, BWA) = 500000 - 0 = 500000
     assert ws.cell(restposten_row, 5).value == 500000
+
+
+def test_inject_restposten_skips_bestandsveraenderung():
+    """Regression Prisma 2026-06: Bestandsveraenderung darf NIE einen Restposten
+    bekommen.
+
+    Das Detail-Konto ist vorzeichen-normalisiert (Verminderung -> negativ,
+    `_normalize_bestand_value`), der Plausibilitaets-Anker `column_sums`
+    (= pdf_sum_gj) bleibt aber roh positiv wie im PDF gedruckt. Ein Restposten
+    = Anker - Detailsumme = (+1,64M) - (-1,64M) = +3,28M wuerde das Vorzeichen
+    der Position kippen -> JUE-Fehler in Millionenhoehe (real: JA2023 +3.283.620,46,
+    JA2024 +1.848.360,50). Eine Bestandsveraenderung ist ein einzelner
+    vorzeichenbehafteter Delta-Wert, kein 'fehlende Konten'-Fall -> kein Restposten.
+    """
+    groups = [{
+        "name": "2. Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+        "type": "ertrag", "gkv_section": "bestandsveraenderung", "sub_group_of": None,
+        "column_sums": {0: 1641810.23},  # roher Anker, positiv wie im PDF
+        "accounts": [{"konto_nr": "", "bezeichnung": "Bestandsveränderung Bauaufträge",
+                      "values": {0: -1641810.23}, "confidence": "high"}],  # normalisiert negativ
+    }]
+    out = _inject_restposten_accounts(groups)
+    accs = out[0]["accounts"]
+    assert len(accs) == 1, "Bestandsveraenderung darf kein Restposten-Konto bekommen"
+    assert all("Restposten" not in (a.get("bezeichnung") or "") for a in accs)
+
+
+def test_inject_restposten_still_fills_non_bestand_groups():
+    """Guard: der Bestand-Skip darf den regulaeren Restposten-Mechanismus
+    (Bilanzbericht: acc_sum < pdf_sum_gj) NICHT abschalten."""
+    groups = [{
+        "name": "7. sonstige betriebliche Aufwendungen", "type": "aufwand",
+        "gkv_section": "sonst_betr_aufwand", "sub_group_of": None,
+        "column_sums": {0: -100000.0},
+        "accounts": [{"konto_nr": "6800", "bezeichnung": "Bueromaterial",
+                      "values": {0: -65000.0}, "confidence": "high"}],
+    }]
+    out = _inject_restposten_accounts(groups)
+    accs = out[0]["accounts"]
+    assert len(accs) == 2
+    rest = accs[-1]
+    assert "Restposten" in rest["bezeichnung"]
+    assert rest["values"][0] == -35000.0  # -100000 - (-65000)
+
+
+def test_build_excel_bestandsveraenderung_verminderung_no_phantom_restposten():
+    """End-to-End über den ganzen Builder (Prisma 2026-06): eine Verminderungs-
+    Bestandsgruppe mit normalisiert-negativem Detail (-1.641.810,23) und rohem
+    positivem Anker (+1.641.810,23) darf KEINE Restposten-Zeile bekommen, und die
+    Gruppen-Sum-Zelle muss =SUM über genau das eine Detail-Konto sein (negativ).
+    Sonst kippt das Vorzeichen und die JÜ-Formel ist 2×|wert| daneben.
+    """
+    cons = {
+        "columns": [{"label": "2023", "kind": "ja", "year": 2023,
+                     "sign_convention": "expenses_positive",
+                     "pdf_jahresueberschuss_gj": 501424.69}],
+        "groups": [
+            {"name": "1. Umsatzerlöse", "type": "ertrag", "sub_group_of": None,
+             "column_sums": {}, "accounts": [
+                {"konto_nr": "8400", "bezeichnung": "Erlöse", "values": {0: 5523319.58},
+                 "confidence": "high"}]},
+            {"name": "2. Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+             "type": "ertrag", "gkv_section": "bestandsveraenderung", "sub_group_of": None,
+             "column_sums": {0: 1641810.23}, "accounts": [
+                {"konto_nr": "", "bezeichnung": "Bestandsveränderung Bauaufträge",
+                 "values": {0: -1641810.23}, "confidence": "high"}]},
+        ],
+        "questions": [],
+    }
+    ws = _ws(build_excel(cons))
+    assert _find_row(ws, "  Restposten — nicht aufgeschlüsselt im PDF") is None, \
+        "Bestandsveränderung darf keine Restposten-Zeile erzeugen"
+    bestand_row = _find_row(
+        ws, "2. Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen")
+    formula = ws.cell(bestand_row, 3).value
+    assert isinstance(formula, str) and formula.startswith("=SUM"), \
+        "Gruppen-Summe muss Formel bleiben"
+    # Das einzige Detail-Konto direkt unter der Gruppe trägt den negativen Wert
+    detail = ws.cell(bestand_row + 1, 3).value
+    assert detail == -1641810.23
 
 
 def test_jahresergebnis_expenses_negative_is_simple_sum():

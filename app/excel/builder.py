@@ -554,6 +554,24 @@ def _infer_sign_conventions(columns: list[dict], groups: list[dict]) -> list[dic
     return out
 
 
+def _is_bestandsveraenderung(g: dict) -> bool:
+    """True für GKV-Position 2 (Erhöhung/Verminderung des Bestandes).
+
+    Bestandsveränderung ist ein einzelner vorzeichenbehafteter Delta-Wert. Die
+    Detail-Konten werden beim Konsolidieren normalisiert (`_normalize_bestand_value`:
+    Verminderung → negativ), der `pdf_sum_gj`-Anker bleibt aber roh (positiv wie
+    im PDF gedruckt). Erkennung per gkv_section ODER Name, weil diese Funktion
+    VOR `_reclassify_bestandsveraenderung` läuft.
+    """
+    if g.get("gkv_section") == "bestandsveraenderung":
+        return True
+    name_lc = (g.get("name") or "").lower()
+    return "bestand" in name_lc and (
+        "verminderung" in name_lc or "erhöhung" in name_lc
+        or "bestandsveränderung" in name_lc
+    )
+
+
 def _inject_restposten_accounts(groups: list[dict]) -> list[dict]:
     """Ergänzt pro Gruppe ein synthetisches "Restposten — nicht aufgeschlüsselt
     im PDF"-Konto wenn `column_sums[col_idx]` (= pdf_sum_gj) für mindestens
@@ -567,12 +585,21 @@ def _inject_restposten_accounts(groups: list[dict]) -> list[dict]:
     Werte aber mit column_sum greift's: acc_sum = 0, diff = column_sum,
     Restposten = column_sum → SUM ergibt column_sum.
 
+    NICHT für Bestandsveränderung (Pos. 2): dort ist das Detail normalisiert
+    (Verminderung → negativ), der Anker aber roh positiv → ein Restposten-Plug
+    wäre `Anker − Detailsumme = 2×|wert|` und würde das Vorzeichen kippen
+    (real: Prisma JA2023/2024, JÜ um Millionen falsch). Bestandsveränderung ist
+    ein einzelner Delta-Wert, kein 'fehlende Konten'-Fall.
+
     Use-Cases:
     - Bilanzbericht-Format: Konten teilweise gelistet, Rest implizit in Summe
     - Mehrere JAs: Spalte hat nur in einem JA Konten, in anderen nur pdf_sum_gj
     """
     out = []
     for g in groups:
+        if _is_bestandsveraenderung(g):
+            out.append(g)
+            continue
         accounts = list(g.get("accounts") or [])
         col_sums = g.get("column_sums") or {}
         if not accounts or not col_sums:
