@@ -61,10 +61,12 @@ zwei Schutzschichten:
 - **`ask`** (prompten trotz Bypass): `python3`, `curl` (Exec-/Netzwerk-Primitive,
   Security-Review). `.venv/bin/python3` + `.venv/bin/pytest` fangen mit `.venv/`
   an → **nicht** betroffen, laufen ohne Prompt.
-- **`deny`** (immer blockiert): `rm -rf`, `git push`, `git reset --hard`.
-  ⚠️ `git push` ist bewusst geblockt bis zum Cutover — vor dem ersten Push aus
-  `deny` entfernen (siehe Cutover-Schritt 2b). Deny ist prefix-basiert, also
-  Leitplanke gegen Versehen, kein dichter Riegel.
+- **`deny`** (immer blockiert): `rm -rf`, `git reset --hard` sowie destruktive
+  `git push`-Varianten (`--force`, `-f`, `--force-with-lease`, `--mirror`,
+  `--delete`). Regulärer `git push` ist seit Cutover-Schritt 2b (erledigt
+  2026-06-11) frei — nur die history-/branch-zerstörenden Varianten bleiben
+  geblockt. Deny ist prefix-basiert, also Leitplanke gegen Versehen, kein
+  dichter Riegel.
 
 ## Architektur in einem Satz
 
