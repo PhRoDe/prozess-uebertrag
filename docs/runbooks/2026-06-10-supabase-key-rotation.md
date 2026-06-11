@@ -1,7 +1,15 @@
 # Runbook: Supabase-Service-Key rotieren
 
-**Wann:** Vor dem Hetzner-Cutover (Stand 2026-06-10). Blockiert die
-Secret-Übergabe an die Calandi-Infra.
+**Wann:** Ursprünglich vor dem Hetzner-Cutover geplant (Stand 2026-06-10).
+
+> [!warning]
+> **Update nach Cutover (2026-06-11):** Die App läuft inzwischen live auf dem
+> Calandi-Hetzner, **Railway ist abgeschaltet**. Der Live-Consumer des Keys ist
+> jetzt die Server-`.env` (`/srv/calandi/uebertrag-stack/.env`), nicht mehr
+> Railway. **Offen:** ob der dort eingetragene Key der rotierte oder noch der
+> geleakte ist — mit Thomas/Leon verifizieren. Falls noch nicht rotiert: die
+> Schritte unten gelten weiter, „Railway" überall durch den Hetzner-Container
+> ersetzen (Thomas/Leon machen das server-seitig).
 
 **Warum:** Der `service_role`-Key wurde am 2026-04-24 über die
 Railway-Variablen exponiert und nie rotiert. Genau dieser Key soll jetzt an
@@ -15,9 +23,9 @@ in die neue Production-Umgebung wandern.
   | Stelle | Was |
   |---|---|
   | Lokale `.env` (Owner-Mac) | Entwicklung/Smoketests |
-  | **Railway-Env** `SUPABASE_SERVICE_KEY` | **aktueller Live-Host** — bricht bei Rotation ohne Update |
+  | **Hetzner-Server-`.env`** (`/srv/calandi/uebertrag-stack/.env`) `SUPABASE_SERVICE_KEY` | **aktueller Live-Host** (seit Cutover 11.06.) — Container bricht bei Rotation ohne Update |
   | 1Password „Calandi/Prozess-Uebertrag" | Quelle der Wahrheit |
-  | Hetzner-`.env` (künftig) | bekommt den **neuen** Key via 1Password |
+  | ~~Railway-Env~~ | abgeschaltet seit 11.06. — kein Consumer mehr |
 - **Code:** `app/db.py` + `app/storage.py` rufen
   `create_client(supabase_url, supabase_service_key)`. Nur server-seitig,
   `service_role`. Der Variablenname bleibt `SUPABASE_SERVICE_KEY`, egal welcher
@@ -36,7 +44,7 @@ in die neue Production-Umgebung wandern.
 
 Supabase' neues Key-System (`sb_secret_…` / `sb_publishable_…`) erlaubt, einen
 neuen Secret-Key zu erstellen und nur den **kompromittierten** Key zu
-widerrufen — ohne den laufenden Railway-Betrieb zu unterbrechen.
+widerrufen — ohne den laufenden Live-Betrieb (Hetzner-Container) zu unterbrechen.
 
 1. Supabase-Dashboard (Calandi-Account) → Projekt `prozess-uebertrag` →
    **Settings → API Keys**.
@@ -47,9 +55,9 @@ widerrufen — ohne den laufenden Railway-Betrieb zu unterbrechen.
    `SUPABASE_SERVICE_KEY`):
    - [ ] 1Password-Item aktualisieren
    - [ ] Lokale `.env`
-   - [ ] **Railway-Env** `SUPABASE_SERVICE_KEY` → Railway redeploy/restart
-   - [ ] An Thomas/Leon für Hetzner-`.env` (via 1Password, nicht Mail/Chat)
-5. **Verifizieren** (siehe unten) — Railway muss mit neuem Key grün sein.
+   - [ ] An Thomas/Leon für die Hetzner-Server-`.env` (via 1Password, nicht
+     Mail/Chat) → sie tragen ihn ein + starten den Container neu
+5. **Verifizieren** (siehe unten) — der Live-Stand (Hetzner) muss mit neuem Key grün sein.
 6. Erst danach: **alten Legacy `service_role`-Key disablen/revoken** im
    Dashboard. Ab jetzt ist der geleakte Key tot.
 
@@ -57,15 +65,15 @@ widerrufen — ohne den laufenden Railway-Betrieb zu unterbrechen.
 
 1. Dashboard → **Settings → API → JWT/Legacy Keys → Rotate**.
 2. ⚠️ Rotiert `anon` **und** `service_role` gleichzeitig → der laufende
-   Railway-Betrieb bricht, bis die Env aktualisiert ist (kurze Downtime).
+   Live-Betrieb (Hetzner-Container) bricht, bis die Env aktualisiert ist (kurze Downtime).
 3. Reihenfolge eng koppeln: **Rotate → sofort** 1Password + lokale `.env` +
-   Railway-Env updaten → Railway restart.
+   Hetzner-Server-`.env` updaten → Container neu starten (Thomas/Leon).
 4. `anon`-Key ändert sich mit — laut Consumer-Liste aber kein Consumer
    (server-gerendert). Vor Rotation kurz gegenchecken.
 
 ## Verifikation (nach Rotation, vor „alten Key tot")
 
-- [ ] `curl https://<aktueller-railway-host>/health` → `{"status":"ok"}`
+- [ ] `curl https://uebertrag.calandi-tools.de/health` → `{"status":"ok"}`
 - [ ] Ein echter Test-Upload erzeugt eine Excel (testet Storage **und** DB mit
       neuem Key)
 - [ ] (optional) Alten Key gegen die REST-API testen → muss `401` liefern
