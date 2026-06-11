@@ -419,9 +419,11 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 - `require_auth` prüft den `X-Authentik-Username`-Header; `current_user()`
   liest Username/Email/Groups aus den `X-Authentik-*`-Headern.
 - **Umsetzung:** Umgesetzt aus Thomas/Leons Spec
-  (`Downloads/2026-06-11-an-philipp-auth-umbau-spec.md`) auf Branch
-  `auth-authentik-umbau`, 115 Tests grün. **Noch nicht gemerged** — Merge erst
-  bei Cutover-Schritt 5 (Stoppschild 1: nicht solange Railway offen ist).
+  (`Downloads/2026-06-11-an-philipp-auth-umbau-spec.md`), **am 11.06. in `main`
+  gemerged** (Merge `7c6f40e`), 115 Tests grün. Sicher, weil Railway-Auto-Deploy
+  aus ist und ein `main`-Push nur CI triggert, kein Live-Deploy — der Stand geht
+  via Hetzner (hinter Authentik) live, sobald Thomas/Leon ihn gezogen + verifiziert
+  haben. Damit ist Cutover-Schritt 5 codeseitig erledigt.
 
 ### Secrets server-seitig (Container-`.env`, NIE ins Repo)
 
@@ -442,8 +444,9 @@ entfällt — der Auth-Patch entfernt es.)
        Webhook über einen Push getriggert werden.
    3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
    4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
-   5. Auth-Patch mergen (Branch `auth-authentik-umbau`, Login raus) — NICHT
-      vorher (Stoppschild 1)
+✅ 5. Auth-Patch gemerged (11.06., Merge `7c6f40e`, Login raus). Sicher weil
+      Auto-Deploy aus → main-Push triggert nur CI. Geht via Hetzner live, sobald
+      Thomas/Leon den Stand gezogen + verifiziert haben.
    6. Railway abschalten
    7. AUFRÄUMEN: diese „Migration"-Sektion + Railway-Erwähnungen aus CLAUDE.md
       in docs/runbooks/ auslagern (3-Zeilen-Pointer behalten) → spart ~60
@@ -484,7 +487,7 @@ entfällt — der Auth-Patch entfernt es.)
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 115 Tests (Branch auth-authentik-umbau; main: 116)
+.venv/bin/pytest                      # 115 Tests (Stand 2026-06-11, Auth-Merge auf main)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 
