@@ -13,27 +13,23 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
 
 ## Wo es läuft
 
-> [!warning]
-> **Migration läuft (Stand 2026-06-10).** Die App zieht von **Railway** auf
-> den **Calandi-Hetzner** (Docker-Container hinter nginx + Authentik). Bis der
-> Hetzner-Stand verifiziert grün ist, ist **Railway weiter der Live-Host**.
-> Cutover-Reihenfolge + offene Punkte siehe Abschnitt **"Migration auf
-> Calandi-Tools (Hetzner + Authentik)"** unten.
+> [!danger]
+> **Live & Auto-Deploy aktiv (seit 2026-06-11).** Jeder Push auf `main` deployt
+> **sofort produktiv** auf `https://uebertrag.calandi-tools.de`. Kein
+> CI-only-Puffer mehr. **Nie ohne grünes pytest pushen** (`./bin/deploy.sh`).
 
-| Was | Aktuell (Railway) | Ziel (Hetzner/Calandi-Tools) |
-|---|---|---|
-| Live-App | Railway-URL (noch aktiv) | https://uebertrag.calandi-tools.de |
-| Host | Railway | Hetzner, Docker-Container hinter nginx (intern Port 8000) |
-| Deploy | `railway up` (Alt) | `git push` auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild |
-| Auth | eigenes Passwort-Gate | **Authentik Forward-Auth** (nginx), Identität via Header |
-| Code-Repo | https://github.com/PhRoDe/prozess-uebertrag (privat) | privat, read-only Deploy-Key `calandi-server` eingetragen (2026-06-10) |
-| Supabase | Projekt `prozess-uebertrag` (Frankfurt) | unverändert |
-| Team-Passwort | `TEAM_CREDENTIALS.local.md` (gitignored) | entfällt mit Authentik |
+| Was | Stand |
+|---|---|
+| Live-App | https://uebertrag.calandi-tools.de |
+| Host | Calandi-Hetzner, Docker-Container hinter nginx (intern Port 8000) |
+| Auth | **Authentik Forward-Auth** (nginx), Identität via `X-Authentik-*`-Header |
+| Deploy | **Push auf `main` → Auto-Deploy** (Server: `git reset --hard origin/main` → `docker compose build` → `up -d`) |
+| Secrets | server-seitig in `/srv/calandi/uebertrag-stack/.env` (nicht im Repo) |
+| Code-Repo | https://github.com/PhRoDe/prozess-uebertrag (privat), Deploy-Key `calandi-server` |
+| Supabase | Projekt `prozess-uebertrag` (Frankfurt), Migrationen **manuell** |
 
-**Ziel-Deploy-Workflow (nach Cutover):** Entwickeln lokal → `git push` auf
-`main` → GitHub-Actions-CI läuft → Webhook triggert den Container-Rebuild auf
-Hetzner. GitHub ist die einzige Quelle der Wahrheit, der Server folgt
-automatisch. Bis dahin gilt für Live noch Railway.
+Wie der Cutover (Railway → Hetzner/Authentik) lief — historisch:
+`docs/runbooks/2026-06-11-hetzner-authentik-cutover.md`.
 
 ## Erstes Setup (neue Sessions / Team-Mitglieder)
 
@@ -52,8 +48,8 @@ cp .env.example .env
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
 ```
 
-Voraussetzungen: Python 3.12+. Nach dem Cutover ist kein Railway-CLI mehr
-nötig — Deploy läuft dann über GitHub-Push + Webhook (siehe oben).
+Voraussetzungen: Python 3.12+. Deploy läuft über GitHub-Push auf `main`
+(Auto-Deploy, siehe oben) — kein Railway, kein manueller Server-Zugriff.
 
 ### Claude-Code-Setup (`.claude/settings.json`)
 
@@ -71,8 +67,8 @@ zwei Schutzschichten:
 
 ## Architektur in einem Satz
 
-FastAPI-Monolith im Docker-Container (in Migration: Railway → Calandi-Hetzner
-hinter nginx/Authentik), HTMX-UI mit Tailwind-CDN, Claude-API für
+FastAPI-Monolith im Docker-Container auf dem Calandi-Hetzner hinter
+nginx/Authentik, HTMX-UI mit Tailwind-CDN, Claude-API für
 PDF-Extraktion, Supabase für Storage+Postgres, alles in einem Python-Container.
 
 ### Datenfluss
@@ -188,6 +184,24 @@ Tiefes „Warum" zu den Vorzeichen-/Routing-Regeln steht in
 `~/.claude/rules/pipeline-engineering.md` (6a–6e, global geladen) — hier nur
 der code-spezifische Kern.
 
+**Live-Betrieb (Auto-Deploy seit 2026-06-11) — Crash-Fallen:**
+- **Jeder Push auf `main` deployt sofort live.** Nie ohne grünes pytest pushen
+  (`./bin/deploy.sh`). Kein CI-only-Puffer.
+- **Neue Pflicht-Env-Var ohne Default crasht den Live-Container.** `app/config.py`
+  ist pydantic-`Settings`; ein neues `x: str` ohne Default lässt den Container
+  beim Start crashen, bis der Wert in der Server-`.env`
+  (`/srv/calandi/uebertrag-stack/.env`) steht. → neue Config/Secrets **vorher
+  Thomas/Leon melden** ODER Default geben (`x: str = "..."`), wenn kein Secret.
+- **Python-Deps gehören in `pyproject.toml`** (`[project].dependencies`) — das
+  `Dockerfile` installiert per `pip install -e .`. **Es gibt kein
+  `requirements.txt`** (das Infra-Briefing nennt es fälschlich). Dep nur dort
+  eingetragen ⇒ nicht im Build ⇒ Import-Error ⇒ Live-Crash.
+- **DB-Migrationen manuell** im Supabase-Projekt ausführen, BEVOR der Code der
+  sie braucht deployt (keine Auto-Migration).
+- **Authentik-Login nicht zurückbauen** — kein Passwort-Gate / Session-Cookie /
+  `app_password_hash` / `session_secret`. `require_auth` prüft den
+  `X-Authentik-Username`-Header, User-Identität immer aus den `X-Authentik-*`-Headern.
+
 **Architektur + Output-Format:**
 - `app/worker/` = Extraktion, **KEINE HTTP-Imports**. `app/excel/` = Output,
   **KEINE Netzwerk-Calls**.
@@ -263,15 +277,15 @@ cd "/Users/philippdegen/Documents/Claude/Calandi/Prozess-Übertrag"
 
 ### Deploy
 
-> [!warning]
-> **Während der Migration:** Der Hetzner-Webhook ist noch nicht final
-> verifiziert. Bis Hetzner grün ist, läuft Live noch auf Railway. Erst nach
-> bestätigtem Cutover (siehe "Migration auf Calandi-Tools") ist `git push` =
-> Live-Deploy.
+> [!danger]
+> **Push auf `main` = sofortiger Live-Deploy.** Der Server zieht `main`
+> automatisch (`git reset --hard origin/main` → `docker compose build` →
+> `up -d`). Kaputter Code auf `main` = kaputte Live-App. **Nie ohne grünes
+> pytest pushen.** Zwei Live-Crash-Fallen: neue Pflicht-Env-Var ohne Default
+> (Container startet nicht) und Deps nur im falschen File (siehe „Wichtige
+> Regeln → Live-Betrieb").
 
-Ziel-Deploy = **Push auf `main`**. Der Webhook (`…/hooks/deploy-uebertrag`)
-triggert den Container-Rebuild auf Hetzner. Kein `railway up`, kein manueller
-Server-Zugriff.
+Deploy = **Push auf `main`**. Kein `railway up`, kein manueller Server-Zugriff.
 
 ```bash
 # Lokales Pre-Push-Gate: blockt den Push wenn pytest rot
@@ -279,10 +293,10 @@ Server-Zugriff.
 ```
 Das Skript läuft pytest → bei rot ABORT. Bei grün: prüft uncommitted changes,
 fragt nach Bestätigung wenn welche da sind, **pusht dann auf GitHub** (`git
-push`). Der Push triggert die GitHub-Actions-CI **und** den Deploy-Webhook.
+push`). Der Push triggert die GitHub-Actions-CI **und** den Auto-Deploy.
 
-**Niemals pushen ohne grünes pytest** — das umgeht den Production-Schutz und
-schiebt kaputten Code direkt auf die Live-App.
+**Niemals pushen ohne grünes pytest** — das schiebt kaputten Code direkt auf
+die Live-App.
 
 **Single-Developer-Setup:** Es entwickelt **nur der Owner** an dieser App
 (andere Personen *nutzen* sie nur über das Calandi-Tools-Portal — laden PDFs
@@ -364,7 +378,7 @@ Regel 5):
    problematischen Jahr. Multi-Jahr-Konstellationen können neue Bugs
    triggern (siehe Tasteone-Synthetic-Parent-Bug 2026-05).
 6. **Commit + Deploy**: `git push` (oder `./bin/deploy.sh` mit Pre-Push-Gate).
-   Der Webhook zieht den Stand auf den Server. Danach Live-Check auf
+   Push auf `main` = Auto-Deploy (Live!). Danach Live-Check auf
    `https://uebertrag.calandi-tools.de/health` (sollte `{"status":"ok"}`).
 7. **POST-FIX-CHECK**: `pytest` muss grün sein UND der Regel-Enforcement-Test
    `test_alle_gruppen_sum_zellen_sind_formeln_kein_hardcoded_wert` muss bestanden
@@ -379,85 +393,21 @@ Regel 5):
 > Wenn die Regel im Weg steht, ist entweder der Fix falsch oder die Regel muss
 > diskutiert + geändert werden — aber NICHT stillschweigend gebrochen.
 
-## Migration auf Calandi-Tools (Hetzner + Authentik)
+## Migration auf Calandi-Tools — abgeschlossen (2026-06-11)
 
-Stand 2026-06-10, koordiniert mit Thomas & Leon (Calandi-Infra). Quelle:
-`Downloads/2026-06-10-an-philipp-umbau-container-authentik.md`.
-
-**Zielbild:** App läuft als Docker-Container auf dem Calandi-Hetzner hinter
-nginx. nginx macht **Authentik Forward-Auth**; die App bekommt die Identität
-über Header `X-Authentik-Username` / `-Email` / `-Groups`. Erreichbar unter
-`https://uebertrag.calandi-tools.de` (Portal-Login, App-Auswahl). Deploy:
-Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
-
-### Sicherheits-Stoppschilder (nicht überspringen)
-
-> [!danger]
-> **1. Login-Code erst entfernen, wenn die App NUR noch hinter Authentik
-> hängt.** Solange sie offen auf Railway erreichbar ist, würde das Entfernen
-> des Passwort-Gates sie ungeschützt ins Netz stellen.
-
-> [!note]
-> **2. ✅ ERLEDIGT (2026-06-10): Read-only Deploy-Key `calandi-server`
-> eingetragen.** Das Repo war ohnehin **schon privat** (entgegen Thomas'
-> Annahme, es sei noch öffentlich) — es gibt kein „auf privat schalten" mehr.
-> Leon klont morgen über genau diesen read-only Key (per SSH); ein
-> Public-Clone funktioniert nicht. Thomas wurde informiert.
-
-> [!danger]
-> **3. Supabase-Service-Key VOR der Secret-Übergabe rotieren.** Der alte Key
-> wurde 2026-04-24 geleakt (Railway-Variables) und nie rotiert. Nicht den
-> kompromittierten Key in die Hetzner-`.env` geben. **Runbook:**
-> `docs/runbooks/2026-06-10-supabase-key-rotation.md` (Schritt-für-Schritt,
-> Consumer-Liste, Option A = neuer `sb_secret_`-Key zero-downtime).
-
-### Auth-Umbau (Login → Authentik)
-
-- Eigenes Passwort-Gate / Session-Login ist entfernt; `APP_PASSWORD_HASH`
-  und `SESSION_SECRET` entfallen vollständig (aus `config.py` raus). Die App
-  braucht keines von beiden mehr — Frage „SESSION_SECRET doppelt?" damit erledigt.
-- `require_auth` prüft den `X-Authentik-Username`-Header; `current_user()`
-  liest Username/Email/Groups aus den `X-Authentik-*`-Headern.
-- **Umsetzung:** Umgesetzt aus Thomas/Leons Spec
-  (`Downloads/2026-06-11-an-philipp-auth-umbau-spec.md`), **am 11.06. in `main`
-  gemerged** (Merge `7c6f40e`), 115 Tests grün. Sicher, weil Railway-Auto-Deploy
-  aus ist und ein `main`-Push nur CI triggert, kein Live-Deploy — der Stand geht
-  via Hetzner (hinter Authentik) live, sobald Thomas/Leon ihn gezogen + verifiziert
-  haben. Damit ist Cutover-Schritt 5 codeseitig erledigt.
-
-### Secrets server-seitig (Container-`.env`, NIE ins Repo)
-
-`ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `PUBLIC_BASE_URL`
-(`=https://uebertrag.calandi-tools.de`). Übergabe über **1Password** (Vault
-„Calandi/Prozess-Uebertrag"), nicht per Mail/Chat-Text. (`SESSION_SECRET`
-entfällt — der Auth-Patch entfernt es.)
-
-### Cutover-Reihenfolge
-
-```
-✅ 0. Deploy-Key eintragen (erledigt 2026-06-10; Repo war schon privat)
-   1. Supabase-Service-Key rotieren → neue Secrets via 1Password an Thomas/Leon
-   2. Leon klont das Repo über den Deploy-Key (morgen)
-   2b. ⚠️ VOR dem ersten Push: `"Bash(git push:*)"` aus dem `deny`-Block in
-       `.claude/settings.json` entfernen — sonst blockt das Sicherheitsnetz
-       jeden Push (bypassPermissions-Setup, wie Nylo). Erst dann kann der
-       Webhook über einen Push getriggert werden.
-   3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
-   4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
-✅ 5. Auth-Patch gemerged (11.06., Merge `7c6f40e`, Login raus). Sicher weil
-      Auto-Deploy aus → main-Push triggert nur CI. Geht via Hetzner live, sobald
-      Thomas/Leon den Stand gezogen + verifiziert haben.
-   6. Railway abschalten
-   7. AUFRÄUMEN: diese „Migration"-Sektion + Railway-Erwähnungen aus CLAUDE.md
-      in docs/runbooks/ auslagern (3-Zeilen-Pointer behalten) → spart ~60
-      Zeilen in der immer-geladenen CLAUDE.md. Erst NACH bestätigtem Cutover.
-```
+Die Migration Railway → Calandi-Hetzner (Docker hinter nginx + Authentik
+Forward-Auth) ist **durch**. Die App läuft live auf
+`https://uebertrag.calandi-tools.de`, Auto-Deploy auf jeden `main`-Push,
+Railway ist abgeschaltet. Vollständiger Cutover-Verlauf + Sicherheits-
+Stoppschilder (historisch): `docs/runbooks/2026-06-11-hetzner-authentik-cutover.md`.
+Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 
 ## Offene Punkte (TODO)
 
-- **Supabase-Service-Key VOR Hetzner-Cutover rotieren** (geleakt 2026-04-24,
-  Railway-Variables). Runbook: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
-  Blockiert die Secret-Übergabe an Calandi-Infra. Erwägen: auch
+- **Supabase-Service-Key-Leak (2026-04-24, Railway-Variables) — Status nach
+  Cutover klären:** mit Thomas/Leon verifizieren, ob der in die Server-`.env`
+  eingetragene Key der **rotierte** oder noch der **geleakte** ist. Runbook:
+  `docs/runbooks/2026-06-10-supabase-key-rotation.md`. Erwägen: auch
   `ANTHROPIC_API_KEY` rotieren (war im selben Leak). `SESSION_SECRET` ist mit
   dem Auth-Patch entfernt — Rotation entfällt.
 - **Rate-Limit ist In-Memory per Container** — bei Multi-Replica/Multi-Container
@@ -497,6 +447,8 @@ entfällt — der Auth-Patch entfernt es.)
 
 ## Dokumentation
 
+- `docs/runbooks/2026-06-11-hetzner-authentik-cutover.md` — Cutover-Verlauf +
+  Live-Betriebs-Regeln (Railway → Hetzner/Authentik, abgeschlossen)
 - `docs/specs/2026-04-23-prozess-uebertrag-design.md` — Original-Design
 - `docs/plans/2026-04-23-implementation-plan.md` — ursprünglicher Plan (historisch)
 - `docs/exploration/htmx-demo.html` — UI-Prototyp vor Implementierung

@@ -4,9 +4,10 @@ Interne Calandi-Web-App: Jahresabschluss-, BWA- und Susa-PDFs per
 Drag-and-Drop hochladen, Claude extrahiert die Konten, Output ist eine
 Excel die die Gliederung der Original-PDF 1:1 übernimmt.
 
-**Live:** aktuell noch auf Railway; **Migration auf
-https://uebertrag.calandi-tools.de** (Hetzner + Authentik) läuft —
-siehe `CLAUDE.md`, Abschnitt "Migration auf Calandi-Tools".
+**Live:** https://uebertrag.calandi-tools.de (Calandi-Hetzner, Docker hinter
+Authentik). **Auto-Deploy: jeder Push auf `main` deployt sofort produktiv** —
+nie ohne grünes pytest pushen. Cutover-Historie:
+`docs/runbooks/2026-06-11-hetzner-authentik-cutover.md`.
 
 Siehe `CLAUDE.md` für die Entwickler-Perspektive,
 `docs/specs/2026-04-23-prozess-uebertrag-design.md` für das Design.
@@ -127,27 +128,25 @@ Wer die App erreicht, ist bereits angemeldet; `require_auth` prüft nur die
 Präsenz des Username-Headers. Setup von nginx + Authentik macht die
 Calandi-Infra (Thomas/Leon), nicht dieses Repo.
 
-### 3. Server (Calandi-Hetzner, Docker) — in Migration
+### 3. Server (Calandi-Hetzner, Docker)
 
-Ziel: App läuft als Docker-Container auf dem Calandi-Hetzner hinter nginx
-(Authentik Forward-Auth) unter `uebertrag.calandi-tools.de`. Deploy:
+App läuft als Docker-Container auf dem Calandi-Hetzner hinter nginx (Authentik
+Forward-Auth) unter `uebertrag.calandi-tools.de`. Deploy = **Push auf `main`**
+→ Server zieht automatisch (`git reset --hard origin/main` → `docker compose
+build` → `up -d`).
 
-```
-git push main (GitHub)  →  Webhook …/hooks/deploy-uebertrag  →  Container-Rebuild
-```
-
-Server-Setup (Container, nginx/Authentik, Env-Vars, Webhook) macht die
-Calandi-Infra (Thomas/Leon), nicht dieses Repo. Der read-only Deploy-Key
-`calandi-server` ist bereits eingetragen (2026-06-10), das Repo ist privat —
-Leon klont darüber. Alle ENV-Vars aus `.env.example` müssen server-seitig
-gesetzt sein (inkl. `PUBLIC_BASE_URL=https://uebertrag.calandi-tools.de`).
-Übergabe der Secrets über 1Password. Cutover-Reihenfolge + Sicherheits-Stopps:
-`CLAUDE.md`, Abschnitt "Migration auf Calandi-Tools".
+Server-Setup (Container, nginx/Authentik, Env-Vars) macht die Calandi-Infra
+(Thomas/Leon), nicht dieses Repo. Die Secrets liegen server-seitig in
+`/srv/calandi/uebertrag-stack/.env` (`ANTHROPIC_API_KEY`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_KEY`, `PUBLIC_BASE_URL`). **Neue Pflicht-Env-Var ohne Default
+crasht den Live-Container** → vorher mit Thomas/Leon abstimmen. Deps gehören in
+`pyproject.toml` (das Dockerfile macht `pip install -e .`), **nicht** in ein
+`requirements.txt`.
 
 ### 4. Health-Check
 
 ```bash
-curl https://uebertrag.calandi-tools.de/health   # nach Cutover
+curl https://uebertrag.calandi-tools.de/health
 # {"status":"ok"}
 ```
 
@@ -171,14 +170,14 @@ project" klicken, 1-2 Minuten warten, dann läuft alles wieder.
 
 ## Projekt-Update-Workflow
 
-Seit 2026-06-10: Deploy = Push auf GitHub. Der Webhook zieht den Stand
-automatisch auf den Calandi-Server.
+Seit 2026-06-11 live mit Auto-Deploy: **jeder Push auf `main` deployt sofort
+produktiv** auf den Calandi-Server. Nie ohne grünes pytest pushen.
 
 ```bash
 # Änderungen machen, Tests grün bekommen
 .venv/bin/pytest
 
-# Push = Deploy (Webhook zieht auf den Server)
+# Push = sofortiger Live-Deploy
 git add . && git commit -m "…" && git push
 
 # bequemer: Pre-Push-Gate (läuft pytest, pusht nur bei grün)
