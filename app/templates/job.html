@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% set show_logout = true %}
 {% block content %}
 <div id="job-state"
      hx-get="/job/{{ job.id }}/status"

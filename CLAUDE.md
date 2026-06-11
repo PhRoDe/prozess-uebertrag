@@ -43,12 +43,13 @@ cd prozess-uebertrag
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 cp .env.example .env
-# → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY + SESSION_SECRET
-#   eintragen (Werte in 1Password "Calandi/Prozess-Uebertrag")
-# → TEAM_CREDENTIALS.local.md aus 1Password ziehen (gitignored, enthält
-#   das Passwort fürs Login der Live-App)
-.venv/bin/pytest                                  # 116 Tests müssen grün sein
+# → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
+#   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
+#   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
+.venv/bin/pytest                                  # 115 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
+# Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
+# nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
 ```
 
 Voraussetzungen: Python 3.12+. Nach dem Cutover ist kein Railway-CLI mehr
@@ -245,7 +246,8 @@ der code-spezifische Kern.
 ```bash
 cd "/Users/philippdegen/Documents/Claude/Calandi/Prozess-Übertrag"
 .venv/bin/uvicorn app.main:app --reload
-# → http://localhost:8000, Passwort aus TEAM_CREDENTIALS.local.md
+# → http://localhost:8000. Auth via Authentik-Header: geschützte Routen lokal
+#   mit  curl -H "X-Authentik-Username: dev" …  ansprechen (nginx fehlt lokal).
 ```
 
 ### Live-Smoketest gegen Claude API
@@ -411,19 +413,22 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 
 ### Auth-Umbau (Login → Authentik)
 
-- Eigenes Passwort-Gate / Session-Login wird entfernt; `APP_PASSWORD_HASH`
-  und das Gate-`SESSION_SECRET` entfallen. **Offen:** ob `SESSION_SECRET`
-  sonst noch gebraucht wird (Thomas listet es doppelt — klären).
-- Falls die App den User braucht: aus den `X-Authentik-*`-Headern lesen.
-- **Umsetzung:** Thomas/Leon liefern einen fertigen Patch/Diff → Owner
-  reviewt, merged, testet. (Nicht selbst bauen — Risiko des „offen im Netz"-
-  Fallstricks ist zu hoch.) Bleibt Owner-Code.
+- Eigenes Passwort-Gate / Session-Login ist entfernt; `APP_PASSWORD_HASH`
+  und `SESSION_SECRET` entfallen vollständig (aus `config.py` raus). Die App
+  braucht keines von beiden mehr — Frage „SESSION_SECRET doppelt?" damit erledigt.
+- `require_auth` prüft den `X-Authentik-Username`-Header; `current_user()`
+  liest Username/Email/Groups aus den `X-Authentik-*`-Headern.
+- **Umsetzung:** Umgesetzt aus Thomas/Leons Spec
+  (`Downloads/2026-06-11-an-philipp-auth-umbau-spec.md`) auf Branch
+  `auth-authentik-umbau`, 115 Tests grün. **Noch nicht gemerged** — Merge erst
+  bei Cutover-Schritt 5 (Stoppschild 1: nicht solange Railway offen ist).
 
 ### Secrets server-seitig (Container-`.env`, NIE ins Repo)
 
 `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `PUBLIC_BASE_URL`
-(`=https://uebertrag.calandi-tools.de`), ggf. `SESSION_SECRET`. Übergabe über
-**1Password** (Vault „Calandi/Prozess-Uebertrag"), nicht per Mail/Chat-Text.
+(`=https://uebertrag.calandi-tools.de`). Übergabe über **1Password** (Vault
+„Calandi/Prozess-Uebertrag"), nicht per Mail/Chat-Text. (`SESSION_SECRET`
+entfällt — der Auth-Patch entfernt es.)
 
 ### Cutover-Reihenfolge
 
@@ -437,7 +442,8 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
        Webhook über einen Push getriggert werden.
    3. Hetzner-Container hochziehen, Webhook testen (Doku-Push als Erst-Test)
    4. uebertrag.calandi-tools.de hinter Authentik grün → /health + Test-Upload
-   5. Auth-Patch mergen (Login raus) — NICHT vorher (Stoppschild 1)
+   5. Auth-Patch mergen (Branch `auth-authentik-umbau`, Login raus) — NICHT
+      vorher (Stoppschild 1)
    6. Railway abschalten
    7. AUFRÄUMEN: diese „Migration"-Sektion + Railway-Erwähnungen aus CLAUDE.md
       in docs/runbooks/ auslagern (3-Zeilen-Pointer behalten) → spart ~60
@@ -449,7 +455,8 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 - **Supabase-Service-Key VOR Hetzner-Cutover rotieren** (geleakt 2026-04-24,
   Railway-Variables). Runbook: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
   Blockiert die Secret-Übergabe an Calandi-Infra. Erwägen: auch
-  `ANTHROPIC_API_KEY` + `SESSION_SECRET` rotieren (waren im selben Leak).
+  `ANTHROPIC_API_KEY` rotieren (war im selben Leak). `SESSION_SECRET` ist mit
+  dem Auth-Patch entfernt — Rotation entfällt.
 - **Rate-Limit ist In-Memory per Container** — bei Multi-Replica/Multi-Container
   funktioniert das nicht mehr. Aktuell OK weil Single-Container.
 - **Phase 3 (festes GKV-Layout in §275-Reihenfolge)**: nicht umgesetzt, weil
@@ -477,7 +484,7 @@ Push auf `main` → Webhook `…/hooks/deploy-uebertrag` → Container-Rebuild.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 116 Tests (Stand 2026-06-10)
+.venv/bin/pytest                      # 115 Tests (Branch auth-authentik-umbau; main: 116)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 

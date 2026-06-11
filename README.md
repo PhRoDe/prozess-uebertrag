@@ -52,7 +52,8 @@ Periode konsolidiert (Cross-Year-Matching via Kontonummer).
 - "Fragen"-Sheet wird **nur** angelegt wenn echte User-Entscheidungen offen
   sind (z.B. abgeschnittene Konto-Bezeichnungen) — bei sauberen Läufen: kein Sheet
 - Ad-hoc-Nutzung, alle Dateien werden nach 24h automatisch gelöscht
-- Team-Passwort-Login, Session-Cookie, Brute-Force- und Upload-Rate-Limit
+- Auth über **Authentik Forward-Auth** (nginx injiziert `X-Authentik-*`),
+  kein eigenes App-Passwort; Upload-Rate-Limit pro Authentik-User + IP
 
 ## Wie es aussieht
 
@@ -80,10 +81,13 @@ python3.12 -m venv .venv
 
 cp .env.example .env
 # ausfüllen: SUPABASE_URL, SUPABASE_SERVICE_KEY, ANTHROPIC_API_KEY,
-# APP_PASSWORD_HASH, SESSION_SECRET, PUBLIC_BASE_URL
+# PUBLIC_BASE_URL  (kein App-Passwort/SESSION_SECRET mehr — Auth via Authentik)
 
 .venv/bin/uvicorn app.main:app --reload
 # → http://localhost:8000
+# Lokal: geschützte Routen (/upload, /job, /download) brauchen den
+# X-Authentik-Username-Header, den sonst nur nginx injiziert. Lokal faken:
+#   curl -H "X-Authentik-Username: dev" http://localhost:8000/upload …
 ```
 
 ## Tests
@@ -115,24 +119,13 @@ docker compose up --build
    ```
 5. Storage → New bucket → Name `prozess-uebertrag`, **private**.
 
-### 2. Team-Passwort generieren
+### 2. Auth (Authentik Forward-Auth)
 
-> **Migration:** Entfällt nach dem Hetzner-Cutover — Auth übernimmt dann
-> **Authentik** (nginx Forward-Auth), das eigene Passwort-Gate
-> (`APP_PASSWORD_HASH`) wird per Patch entfernt. Bis dahin gilt das Folgende.
-
-```bash
-.venv/bin/python3 -c "
-import secrets, string, bcrypt
-pw = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
-print('PASSWORD=', pw)
-print('HASH=', bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode())
-print('SESSION_SECRET=', secrets.token_hex(32))
-"
-```
-
-Passwort an Team weitergeben, Hash + Secret als Server-Env (bzw.
-GitHub-Secret) setzen.
+Kein App-Passwort mehr. nginx auf dem Calandi-Hetzner macht Authentik
+Forward-Auth und injiziert `X-Authentik-Username` / `-Email` / `-Groups`.
+Wer die App erreicht, ist bereits angemeldet; `require_auth` prüft nur die
+Präsenz des Username-Headers. Setup von nginx + Authentik macht die
+Calandi-Infra (Thomas/Leon), nicht dieses Repo.
 
 ### 3. Server (Calandi-Hetzner, Docker) — in Migration
 
@@ -170,8 +163,8 @@ project" klicken, 1-2 Minuten warten, dann läuft alles wieder.
 - **Scan-PDFs** dauern 2-4 min (statt 30-60s) und kosten ~0,40-0,60 €/PDF
   (Claude Vision) statt ~0,10 €.
 - **Max 10 PDFs, je max 10 MB pro Upload.**
-- **Rate-Limits:** 10 Uploads/Stunde pro Session+IP, 10 Login-Versuche/15 min
-  pro IP.
+- **Rate-Limit:** 10 Uploads/Stunde pro Authentik-User + IP. (Kein
+  Login-Rate-Limit mehr — Login macht Authentik.)
 - **Offener Punkt:** Supabase-Service-Key wurde während Setup einmal exponiert
   — vor echtem Deal-Upload im Dashboard rotieren
   (Settings → API → JWT Keys).
