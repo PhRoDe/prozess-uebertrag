@@ -81,6 +81,33 @@ def test_summary_only_position_missing_in_newest_ja_not_dropped():
     assert cs.get(col[2022]) == 430.40, "VJ-Wert (2022) von JA2023 fehlt"
 
 
+def test_vj_accounts_not_duplicated_when_year_has_own_ja():
+    """Regression Prisma 2026-06 / Doppelzählung: Hat ein Jahr ein eigenes JA
+    (Eigenjahr = authoritativ), dürfen die ANDERS benannten Vorjahres-Konten des
+    Folge-JA nicht als Duplikate in dieselbe Spalte wandern. Sonst summiert sich
+    die Spalte doppelt und der negative Restposten hebt es auf ('addiert-dann-
+    abgezogen'). Real: JA2024-VJ 'Umsatzerlöse' vs JA2023-Eigenjahr 'Erlöse
+    umsatzsteuerpflichtig' — beide für 2023.
+    """
+    doc23 = _ja(2023, 2022, [
+        _grp("1. Umsatzerlöse", "ertrag",
+             [_acc(None, "Erlöse umsatzsteuerpflichtig", 5155130.41, 2356170.92)],
+             pdf_sum_gj=5155130.41, gkv_section="umsatzerloese"),
+    ])
+    doc24 = _ja(2024, 2023, [
+        _grp("1. Umsatzerlöse", "ertrag",
+             [_acc(None, "Umsatzerlöse", 4295856.96, 5155130.41)],  # VJ 2023, anderer Name
+             pdf_sum_gj=4295856.96, gkv_section="umsatzerloese"),
+    ])
+    r = merge_extractions([doc23, doc24])
+    col = {r["columns"][i]["year"]: i for i in range(len(r["columns"]))}
+    umsatz = [g for g in r["groups"] if "Umsatzerl" in g["name"]][0]
+    c2023 = col[2023]
+    vals_2023 = [a["values"][c2023] for a in umsatz["accounts"] if c2023 in a.get("values", {})]
+    assert vals_2023 == [5155130.41], \
+        f"2023-Spalte doppelt belegt (VJ-Duplikat aus JA2024): {vals_2023}"
+
+
 def test_multi_year_ja_matches_accounts_by_konto_nr():
     doc23 = _ja(2023, 2022, [
         _grp("Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse 19%", 900000, 800000)]),

@@ -301,6 +301,93 @@ def test_pattern_E_eur_hinzurechnungen_kuerzungen():
     _assert_excel_production_ready(xlsx, expected_pdf_jue={1: 33000.00})
 
 
+# --- Pattern G: Prisma-Mehrjahres-Fehler kombiniert (2026-06) --------------------
+
+def test_pattern_G_prisma_three_multi_year_bugs_combined():
+    """Pattern G (Prisma 2026-06): kombiniert die drei in der Produktion
+    gefundenen Mehrjahres-Fehler in EINEM End-to-End-Lauf:
+
+      1. Verminderung des Bestandes — Detail normalisiert negativ, pdf_sum-Anker
+         roh positiv → ohne Fix Phantom-Restposten 2×|wert|, JÜ um Millionen falsch.
+      2. GuV-Position (Zinsaufwand) fehlt im JÜNGSTEN JA → ohne Fix aus den
+         älteren JAs gedroppt (Template-from-newest), JÜ zu hoch.
+      3. Folge-JA benennt sein Vorjahr anders (Umsatz-Klumpen statt Einzelkonten)
+         → ohne Fix Doppelzählung in der Eigenjahr-Spalte ('addiert-dann-abgezogen').
+
+    Akzeptanz: alle 4 JA-Spalten centgenau (0 Mismatch — fängt Fehler 1 + 2),
+    Zinsaufwand-Position erhalten (Fehler 2), keine VJ-Duplikate (Fehler 3).
+    """
+    def _ja(year, ums_acc, bestand_name, bestand_gj, bestand_vj,
+            ums_gj, ums_vj, mat_gj, mat_vj, jue_gj, jue_vj, zins_gj=None, zins_vj=None):
+        groups = [
+            {"name": "1. Umsatzerlöse", "type": "ertrag", "sub_group_of": None,
+             "gkv_section": "umsatzerloese", "pdf_sum_gj": ums_gj,
+             "accounts": [{"konto_nr": ums_acc[0], "bezeichnung": ums_acc[1],
+                            "betrag_gj": ums_gj, "betrag_vj": ums_vj, "confidence": "high"}]},
+            {"name": bestand_name, "type": "ertrag", "sub_group_of": None,
+             "gkv_section": "bestandsveraenderung", "pdf_sum_gj": bestand_gj,
+             "accounts": [{"konto_nr": "8990", "bezeichnung": "Bestandsveränderung",
+                            "betrag_gj": bestand_gj, "betrag_vj": bestand_vj,
+                            "confidence": "high"}]},
+            {"name": "4. Materialaufwand", "type": "aufwand", "sub_group_of": None,
+             "gkv_section": "materialaufwand_rhb", "pdf_sum_gj": mat_gj,
+             "accounts": [{"konto_nr": "5400", "bezeichnung": "Wareneingang",
+                            "betrag_gj": mat_gj, "betrag_vj": mat_vj, "confidence": "high"}]},
+        ]
+        if zins_gj is not None:
+            groups.append(
+                {"name": "9. Zinsen und ähnliche Aufwendungen", "type": "aufwand",
+                 "sub_group_of": None, "gkv_section": "zinsaufwand",
+                 "pdf_sum_gj": zins_gj, "pdf_sum_vj": zins_vj, "accounts": []})
+        return {"type": "jahresabschluss", "year": year, "previous_year": year - 1,
+                "sign_convention": "expenses_positive", "open_questions": [],
+                "groups": groups,
+                "pdf_jahresueberschuss_gj": jue_gj, "pdf_jahresueberschuss_vj": jue_vj}
+
+    # JÜ = Umsatz + Bestand(signiert) - Material - Zinsaufwand
+    docs = [
+        # 2022: Erhöhung (+), MIT Zinsaufwand. VJ liefert 2021.
+        _ja(2022, ("8400", "Erlöse A"),
+            "2. Erhöhung des Bestandes an fertigen und unfertigen Erzeugnissen",
+            bestand_gj=30000.0, bestand_vj=20000.0,
+            ums_gj=800000.0, ums_vj=700000.0, mat_gj=300000.0, mat_vj=250000.0,
+            zins_gj=5000.0, zins_vj=4000.0,
+            jue_gj=525000.0, jue_vj=466000.0),   # 2022: 800-300+30-5 ; 2021: 700-250+20-4
+        # 2023: Verminderung (−, Fehler 1), MIT Zinsaufwand.
+        _ja(2023, ("8400", "Erlöse A"),
+            "2. Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+            bestand_gj=40000.0, bestand_vj=None,
+            ums_gj=900000.0, ums_vj=800000.0, mat_gj=320000.0, mat_vj=300000.0,
+            zins_gj=6000.0, zins_vj=5000.0,
+            jue_gj=534000.0, jue_vj=525000.0),   # 2023: 900-320-40-6
+        # 2024 (jüngster): Verminderung, OHNE Zinsaufwand (Fehler 2), Umsatz
+        # anders benannt (Fehler 3).
+        _ja(2024, ("8000", "Umsatzerlöse gesamt"),
+            "2. Verminderung des Bestandes an fertigen und unfertigen Erzeugnissen",
+            bestand_gj=50000.0, bestand_vj=None,
+            ums_gj=1000000.0, ums_vj=900000.0, mat_gj=350000.0, mat_vj=320000.0,
+            jue_gj=600000.0, jue_vj=534000.0),   # 2024: 1000-350-50
+    ]
+    cons = merge_extractions(docs)
+    xlsx = build_excel(cons)
+    col = {cons["columns"][i]["year"]: i for i in range(len(cons["columns"]))}
+
+    # Akzeptanz: alle 4 JA-Spalten centgenau (Fehler 1 + 2)
+    _assert_excel_production_ready(xlsx, expected_pdf_jue={
+        col[2021]: 466000.0, col[2022]: 525000.0,
+        col[2023]: 534000.0, col[2024]: 600000.0})
+
+    # Fehler 2: Zinsaufwand-Position erhalten (nicht aus älterem JA gedroppt)
+    zins = [g for g in cons["groups"] if g.get("gkv_section") == "zinsaufwand"]
+    assert zins, "Zinsaufwand-Position wurde gedroppt (Fehler 2)"
+
+    # Fehler 3: keine VJ-Duplikate in der Umsatz-2023-Spalte (Eigenjahr authoritativ)
+    umsatz = [g for g in cons["groups"] if "Umsatzerl" in g["name"]][0]
+    c23 = col[2023]
+    vals = [a["values"][c23] for a in umsatz["accounts"] if c23 in a.get("values", {})]
+    assert vals == [900000.0], f"VJ-Duplikat in Umsatz-2023 (Fehler 3): {vals}"
+
+
 # --- Pattern F: Multi-Year-Setup baut ohne Crash --------------------------------
 
 def test_pattern_F_multi_year_baut_ohne_crash():

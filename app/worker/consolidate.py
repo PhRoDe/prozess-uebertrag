@@ -494,6 +494,14 @@ def _apply_previous_year_values(ja_docs: list[dict], columns: list[dict],
                 break
         if vj_col_idx is None:
             continue
+        # Hat das VJ-Jahr ein eigenes JA, ist seine Spalte bereits vollstaendig
+        # und authoritativ durch _ingest_ja belegt. VJ-Werte aus dem Folge-JA
+        # waeren reine Duplikate -> Doppelzaehlung (anders benannte Konten matchen
+        # nicht, der negative Restposten hebt sie auf, 'addiert-dann-abgezogen').
+        # Nur VJ-Spalten OHNE eigenes JA (z.B. aeltestes Jahr) brauchen die
+        # VJ-Werte. Real: Prisma JA2024-VJ "Umsatzerlöse" doppelte 2023.
+        if any(d.get("year") == vj for d in ja_docs):
+            continue
 
         for g in doc.get("groups", []):
             gname = g["name"]
