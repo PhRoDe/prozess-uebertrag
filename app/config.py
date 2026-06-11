@@ -8,8 +8,6 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     supabase_url: str
     supabase_service_key: str
-    app_password_hash: str
-    session_secret: str
     public_base_url: str = "http://localhost:8000"
 
     # Limits (spec section 8)

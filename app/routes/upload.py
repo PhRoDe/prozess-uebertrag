@@ -33,10 +33,10 @@ async def upload(
     if not require_auth(request):
         raise HTTPException(status_code=401)
 
-    # Fix: Rate-Limit 10 Uploads/Stunde, Key = Session-Cookie + Client-IP
-    session_token = request.cookies.get("pu_session", "anon")[:40]
+    # Fix: Rate-Limit 10 Uploads/Stunde, Key = Authentik-User + Client-IP
+    user = request.headers.get("X-Authentik-Username", "anon")[:40]
     ip = client_ip(request)
-    if not rate_allow(f"upload:{session_token}:{ip}", max_hits=10, window_seconds=3600):
+    if not rate_allow(f"upload:{user}:{ip}", max_hits=10, window_seconds=3600):
         raise HTTPException(status_code=429,
                             detail="Zu viele Uploads. Bitte eine Stunde warten.")
 

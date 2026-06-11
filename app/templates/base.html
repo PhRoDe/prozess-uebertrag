@@ -15,16 +15,9 @@
 </head>
 <body class="bg-slate-50 min-h-screen">
   <div class="max-w-3xl mx-auto py-12 px-4">
-    <header class="mb-8 flex items-center justify-between">
-      <div>
-        <h1 class="text-3xl font-bold text-slate-900">Prozess-Übertrag</h1>
-        <p class="text-slate-600 mt-1">Jahresabschlüsse in Excel übertragen — Calandi intern</p>
-      </div>
-      {% if show_logout %}
-        <form action="/logout" method="post">
-          <button class="text-sm text-slate-600 hover:text-slate-900 underline">Logout</button>
-        </form>
-      {% endif %}
+    <header class="mb-8">
+      <h1 class="text-3xl font-bold text-slate-900">Prozess-Übertrag</h1>
+      <p class="text-slate-600 mt-1">Jahresabschlüsse in Excel übertragen — Calandi intern</p>
     </header>
     {% block content %}{% endblock %}
   </div>
