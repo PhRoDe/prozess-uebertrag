@@ -26,7 +26,7 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
 | Deploy | **Push auf `main` → Auto-Deploy** (Server: `git reset --hard origin/main` → `docker compose build` → `up -d`) |
 | Secrets | server-seitig in `/srv/calandi/uebertrag-stack/.env` (nicht im Repo) |
 | Code-Repo | https://github.com/PhRoDe/prozess-uebertrag (privat), Deploy-Key `calandi-server` |
-| Supabase | Projekt `prozess-uebertrag` (Frankfurt), Migrationen **manuell** |
+| Supabase | Projekt `prozess-uebertrag` (Frankfurt, ref `msqpaiyptgrchomgdpxa`), Migrationen **manuell**. Tabellen: `jobs` (App) + `keepalive` (calandi-tools-Heartbeat, siehe Regeln) |
 
 Wie der Cutover (Railway → Hetzner/Authentik) lief — historisch:
 `docs/runbooks/2026-06-11-hetzner-authentik-cutover.md`.
@@ -42,7 +42,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 115 Tests müssen grün sein
+.venv/bin/pytest                                  # 121 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -245,6 +245,12 @@ der code-spezifische Kern.
   kein Cross-Check.
 - **Susa-Filterung**: Klassen 0/1/9 (Bilanz, Saldenvorträge) in `SUSA_PROMPT`
   ausgeschlossen.
+- **keepalive-Tabelle nie ins App-Cleanup**: `public.keepalive` (Single-Row +
+  `keepalive_ping()`-RPC, Migration `0002_keepalive.sql`) ist der
+  calandi-tools-Heartbeat gegen Supabase-Free-Pausierung — **kein** App-Objekt.
+  Die App löscht nur gezielt aus `jobs` (`delete ... eq(id)`, plus pg_cron
+  `cleanup_expired_jobs`) + eigene Bucket-Pfade. Beim Erweitern des Cleanups nie
+  `truncate`/breites Löschen einführen, das `keepalive` mitnehmen könnte.
 
 **Audit + Secrets:**
 - **Stille Auflösung von Mismatches**: `previous_year_mismatch` → Eigenjahr
@@ -437,7 +443,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 115 Tests (Stand 2026-06-11, Auth-Merge auf main)
+.venv/bin/pytest                      # 121 Tests (Stand 2026-06-12)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 
