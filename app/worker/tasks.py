@@ -9,7 +9,7 @@ import logging
 import os
 import socket
 
-from app.db import JobsRepo
+from app.db import JobsRepo, LineItemsRepo
 from app.excel.builder import build_excel
 from app.models import JobStatus
 from app.storage import StorageClient
@@ -158,6 +158,14 @@ def extract_job(job_id: str) -> None:
             "open_questions": open_questions,
         }
         repo.set_extraction(job_id, payload)
+        # Phase 2: relationale Konten-Schicht (line_items) materialisieren.
+        # Auxiliär/Audit — die ausgelieferte Excel kommt weiter aus dem
+        # consolidated-JSONB. Ein Fehler hier darf den Job NICHT scheitern
+        # lassen (graceful degradation), darum eigenes try/except.
+        try:
+            LineItemsRepo().materialize(job_id, consolidated)
+        except Exception:
+            log.exception("materialize line_items failed (non-critical) for %s", job_id)
     except ExtractionError as e:
         log.exception("extract_job(%s) ExtractionError", job_id)
         repo.set_status(job_id, JobStatus.FAILED, error=f"Extraktion fehlgeschlagen: {e}")

@@ -1,6 +1,16 @@
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
+import pytest
 from app.models import Job, InputFile, JobStatus
+
+
+@pytest.fixture(autouse=True)
+def _stub_line_items_repo():
+    """extract_job materialisiert line_items über LineItemsRepo(). In Unit-Tests
+    NIE die echte (network-)Repo konstruieren — sonst Live-DB-Zugriff. Tests, die
+    materialize prüfen, patchen zusätzlich selbst."""
+    with patch("app.worker.tasks.LineItemsRepo"):
+        yield
 
 
 def make_job(status=JobStatus.UPLOADED, extraction=None):
@@ -310,3 +320,38 @@ def test_unresolved_gaps_surface_in_consolidated_questions():
         qs = payload["consolidated"].get("questions", [])
         assert any(q.get("type") == "completeness_gap" for q in qs), \
             f"offene Lücke fehlt im Fragen-Sheet: {qs}"
+
+
+def test_extract_materializes_line_items_and_survives_its_failure():
+    """Phase 2: line_items werden materialisiert; schlägt das fehl (DB-Problem),
+    darf der Job NICHT scheitern (non-critical, graceful)."""
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.LineItemsRepo") as LIRepo, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="JA " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV text"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "jahresabschluss"
+        claude.extract_text_pdf.return_value = {
+            "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+            "groups": [], "open_questions": []}
+        LIRepo.return_value.materialize.side_effect = RuntimeError("DB down")
+
+        extract_job("job-1")
+
+        # materialize wurde versucht …
+        LIRepo.return_value.materialize.assert_called_once()
+        # … und der Job ist trotzdem nicht gescheitert
+        repo.set_extraction.assert_called_once()
+        failed = [c for c in repo.set_status.call_args_list
+                  if len(c.args) >= 2 and c.args[1] == JobStatus.FAILED]
+        assert not failed, f"Job sollte nicht failen: {failed}"

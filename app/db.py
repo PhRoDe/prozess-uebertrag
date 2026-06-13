@@ -75,3 +75,101 @@ class JobsRepo:
 
     def _row_to_job(self, row: dict[str, Any]) -> Job:
         return Job.model_validate(row)
+
+
+def _col_get(d: dict, ci: int):
+    """Spalten-Wert robust holen — int-Key (in-memory) ODER String-Key
+    (falls die Struktur doch mal durch JSONB lief)."""
+    d = d or {}
+    if ci in d:
+        return d[ci]
+    return d.get(str(ci))
+
+
+def project_line_items(job_id: str, consolidated: dict[str, Any]
+                       ) -> tuple[list[dict], list[dict]]:
+    """Projiziere die consolidated-Struktur in flache Zeilen für die relationale
+    Konten-Schicht. Rein (kein I/O).
+
+    Returns: (line_items_rows, line_item_group_rows).
+    - line_items: eine Zeile pro Konto × Spalte mit Wert.
+    - line_item_groups: eine Zeile pro Gruppe × Spalte mit gedruckter Summe
+      (column_sums) und/oder Konten-Summe — Basis für v_job_completeness.
+    """
+    columns = consolidated.get("columns", [])
+    groups = consolidated.get("groups", [])
+    # Kinder pro Parent vorberechnen — die group-row eines Parents rechnet die
+    # Konten der Sub-Gruppen mit ein (Parent=Summe-der-Kinder, wie Builder/
+    # verify.py), sonst zeigt ein Parent mit Detail in den Subs eine Falsch-
+    # Lücke in v_job_completeness (Code-Review #3).
+    children_of: dict[str, list[dict]] = {}
+    for g in groups:
+        parent = g.get("sub_group_of")
+        if parent:
+            children_of.setdefault(parent, []).append(g)
+
+    line_items: list[dict] = []
+    group_rows: list[dict] = []
+    for g in groups:
+        gname = g.get("name")
+        gsec = g.get("gkv_section")
+        col_sums = g.get("column_sums") or {}
+        accounts = g.get("accounts") or []
+        for ci, col in enumerate(columns):
+            label = col.get("label")
+            src = col.get("kind")
+            printed = _col_get(col_sums, ci)
+            own_sum = 0.0
+            has_own_value = False
+            for acc in accounts:
+                v = _col_get(acc.get("values") or {}, ci)
+                if not isinstance(v, (int, float)):
+                    continue
+                has_own_value = True
+                own_sum += v
+                line_items.append({
+                    "job_id": job_id, "source_type": src, "col_idx": ci,
+                    "column_label": label, "group_name": gname,
+                    "gkv_section": gsec, "konto_nr": acc.get("konto_nr"),
+                    "bezeichnung": acc.get("bezeichnung"), "betrag": v,
+                    "confidence": acc.get("confidence"),
+                    "is_restposten": acc.get("confidence") == "synthetic",
+                })
+            # acc_sum der group-row inkl. Konten der Sub-Gruppen
+            child_sum = 0.0
+            has_child_value = False
+            for child in children_of.get(gname, []):
+                for acc in child.get("accounts") or []:
+                    v = _col_get(acc.get("values") or {}, ci)
+                    if isinstance(v, (int, float)):
+                        child_sum += v
+                        has_child_value = True
+            if printed is not None or has_own_value or has_child_value:
+                group_rows.append({
+                    "job_id": job_id, "col_idx": ci, "column_label": label,
+                    "group_name": gname, "gkv_section": gsec,
+                    "printed_sum": printed if isinstance(printed, (int, float)) else None,
+                    "acc_sum": round(own_sum + child_sum, 2),
+                })
+    return line_items, group_rows
+
+
+class LineItemsRepo:
+    """Relationale Konten-Schicht (Phase 2). Schreibt die abgeleiteten
+    line_items/line_item_groups eines Jobs. Idempotent: alte Zeilen des Jobs
+    werden gezielt (eq job_id) gelöscht, dann neu eingefügt — kein breites
+    Löschen, `keepalive` bleibt unberührt."""
+
+    def __init__(self, client: Client | None = None) -> None:
+        s = get_settings()
+        self.client = client or create_client(s.supabase_url, s.supabase_service_key)
+
+    def materialize(self, job_id: str, consolidated: dict[str, Any]) -> None:
+        line_items, group_rows = project_line_items(job_id, consolidated)
+        # Idempotenz: vorhandene Zeilen dieses Jobs entfernen (eq job_id).
+        self.client.table("line_items").delete().eq("job_id", job_id).execute()
+        self.client.table("line_item_groups").delete().eq("job_id", job_id).execute()
+        if line_items:
+            self.client.table("line_items").insert(line_items).execute()
+        if group_rows:
+            self.client.table("line_item_groups").insert(group_rows).execute()
