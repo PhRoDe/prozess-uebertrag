@@ -5,11 +5,13 @@ Idempotent + claim-based:
 - Konkurrierende Worker (z.B. nach einem Deploy-Restart) treten sich nicht
   auf die Füße — nur der erste try_claim gewinnt (Fix 1A)
 """
+import copy
+import hashlib
 import logging
 import os
 import socket
 
-from app.db import JobsRepo, LineItemsRepo
+from app.db import JobsRepo, LineItemsRepo, PdfCacheRepo
 from app.excel.builder import build_excel
 from app.models import JobStatus
 from app.storage import StorageClient
@@ -26,11 +28,52 @@ log = logging.getLogger(__name__)
 # Eindeutige Node-ID pro Prozess (Fix 1A)
 NODE_ID = f"{socket.gethostname()}-{os.getpid()}"
 
+# Pipeline-Cache-Version (Phase 4): bei Änderungen an der Extraktions-/Heilungs-
+# /Prompt-Logik bumpen, um gecachte Extraktionen zu invalidieren (Cache-Key =
+# pdf_hash × f"{model}:v{_CACHE_VERSION}").
+_CACHE_VERSION = "1"
+
 TERMINAL_STATES = {JobStatus.READY, JobStatus.REVIEW_NEEDED,
                    JobStatus.FAILED, JobStatus.EXPIRED}
 
 
-def _extract_pdf(claude: ClaudeClient, data: bytes) -> list[dict]:
+def _extract_pdf(claude: ClaudeClient, data: bytes,
+                 cache: PdfCacheRepo | None = None) -> list[dict]:
+    """Extrahiere ein PDF → eine oder ZWEI Extraktionen, mit optionalem Cache.
+
+    Phase 4: inhalts-adressierter Cache je (sha256(data) × Modell). Bei Treffer
+    werden ALLE Claude-Calls (Klassifikation + Extraktion + Selbstheilung)
+    übersprungen. Best-effort: ein Cache-Fehler darf den Job NICHT scheitern
+    lassen — Fallback auf frische Extraktion.
+    """
+    if cache is None:
+        return _extract_pdf_uncached(claude, data)
+    pdf_hash = hashlib.sha256(data).hexdigest()
+    # Modell-Key trägt eine Pipeline-Cache-Version: ändert sich die
+    # Extraktions-/Heilungs-/Prompt-Logik (bei gleichem Modell-String), wird der
+    # Cache durch Bumpen von _CACHE_VERSION invalidiert (sonst 30 Tage stale).
+    model_key = f"{claude.model}:v{_CACHE_VERSION}"
+    try:
+        hit = cache.get(pdf_hash, model_key)
+    except Exception:
+        log.warning("pdf cache get failed (non-critical)", exc_info=True)
+        hit = None
+    if hit is not None:
+        log.info("pdf cache hit %s…", pdf_hash[:12])
+        return copy.deepcopy(hit)  # Kopie: extract_job mutiert ['file']
+    result = _extract_pdf_uncached(claude, data)
+    # Nur SAUBERE Extraktionen cachen: bleibt eine Lücke offen
+    # (_unresolved_gaps, z.B. transienter Heilungs-Fehler), nicht einfrieren —
+    # ein späterer Re-Run soll erneut heilen können (Code-Review).
+    if not any(e.get("_unresolved_gaps") for e in result):
+        try:
+            cache.put(pdf_hash, model_key, result)
+        except Exception:
+            log.warning("pdf cache put failed (non-critical)", exc_info=True)
+    return result
+
+
+def _extract_pdf_uncached(claude: ClaudeClient, data: bytes) -> list[dict]:
     """Extrahiere ein PDF → eine oder ZWEI Extraktionen.
 
     Kombiniertes DATEV-Bundle (BWA-Aggregat + 'Summen und Salden'-Susa in einer
@@ -117,6 +160,7 @@ def extract_job(job_id: str) -> None:
     repo = JobsRepo()
     storage = StorageClient()
     claude = ClaudeClient()
+    cache = PdfCacheRepo()  # Phase 4: PDF-Extraktions-Cache (best-effort)
 
     # Fix 1D: Already processed?
     existing = repo.get(job_id)
@@ -141,7 +185,7 @@ def extract_job(job_id: str) -> None:
         extractions: list[dict] = []
         for input_file in job.input_files:
             data = storage.download_input(input_file.storage_path)
-            for extraction in _extract_pdf(claude, data):
+            for extraction in _extract_pdf(claude, data, cache=cache):
                 extraction["file"] = input_file.name
                 extractions.append(extraction)
 

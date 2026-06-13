@@ -66,3 +66,34 @@ def test_parse_betrag_deutsches_tausender_format():
     assert _parse_betrag("1.000.000,00") == 1000000.00
     assert _parse_betrag("") is None
     assert _parse_betrag("abc") is None
+
+
+# --- Phase 4: Owner-Scoping ---
+
+class _FakeJob:
+    def __init__(self, created_by):
+        self.created_by = created_by
+
+class _FakeReq:
+    def __init__(self, username):
+        self.headers = {"X-Authentik-Username": username}
+
+def test_job_owner_ok_legacy_none_erlaubt():
+    """Bestandsjobs ohne created_by (vor Migration) bleiben für alle zugänglich."""
+    from app.routes.pages import job_owner_ok
+    assert job_owner_ok(_FakeReq("bob"), _FakeJob(None)) is True
+
+def test_job_owner_ok_eigener_job():
+    from app.routes.pages import job_owner_ok
+    assert job_owner_ok(_FakeReq("alice"), _FakeJob("alice")) is True
+
+def test_job_owner_ok_fremder_job_verboten():
+    from app.routes.pages import job_owner_ok
+    assert job_owner_ok(_FakeReq("bob"), _FakeJob("alice")) is False
+
+
+def test_job_owner_ok_leerer_string_nicht_offen():
+    """Code-Review: nur created_by IS NULL = legacy-offen. '' (falls je
+    gespeichert) darf NICHT alle Jobs öffnen → kein IDOR."""
+    from app.routes.pages import job_owner_ok
+    assert job_owner_ok(_FakeReq("bob"), _FakeJob("")) is False

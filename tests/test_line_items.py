@@ -312,3 +312,40 @@ def test_completeness_summary_diff_aus_konsolidierter_spalte():
     assert g1["diff"] == 100.0       # 1000 - 900 (konsolidiert), nicht 889
     assert g1["acc_sum"] == 900.0
     assert all(g["target_group"] != "9. Schon voll" for g in s["gaps"])  # gedroppt
+
+
+# --- Phase 4: PdfCacheRepo + created_by ---
+
+def test_pdf_cache_repo_get_und_put():
+    from unittest.mock import MagicMock
+    from app.db import PdfCacheRepo
+    client = MagicMock()
+    tbl = MagicMock()
+    client.table.return_value = tbl
+    # get: Treffer
+    tbl.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = [
+        {"extractions": [{"type": "jahresabschluss"}]}]
+    repo = PdfCacheRepo(client=client)
+    assert repo.get("hash1", "claude-x") == [{"type": "jahresabschluss"}]
+    # get: kein Treffer
+    tbl.select.return_value.eq.return_value.eq.return_value.execute.return_value.data = []
+    assert repo.get("hash1", "claude-x") is None
+    # put: upsert mit on_conflict
+    repo.put("hash1", "claude-x", [{"type": "jahresabschluss"}])
+    args, kwargs = tbl.upsert.call_args
+    assert args[0]["pdf_hash"] == "hash1" and args[0]["model"] == "claude-x"
+    assert kwargs["on_conflict"] == "pdf_hash,model"
+
+
+def test_jobs_repo_create_setzt_created_by():
+    from unittest.mock import MagicMock
+    from datetime import datetime, timezone
+    from app.db import JobsRepo
+    client = MagicMock()
+    client.table.return_value.insert.return_value.execute.return_value.data = [{
+        "id": "j1", "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "uploaded", "input_files": [],
+        "expires_at": datetime.now(timezone.utc).isoformat(), "created_by": "alice"}]
+    JobsRepo(client=client).create([], created_by="alice")
+    row = client.table.return_value.insert.call_args.args[0]
+    assert row["created_by"] == "alice"

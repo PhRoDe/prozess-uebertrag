@@ -3,7 +3,7 @@ from fastapi.responses import RedirectResponse
 
 from app.db import JobsRepo
 from app.models import JobStatus
-from app.routes.pages import require_auth
+from app.routes.pages import require_auth, job_owner_ok
 from app.storage import StorageClient
 
 router = APIRouter()
@@ -16,5 +16,7 @@ def download(request: Request, job_id: str):
     job = JobsRepo().get(job_id)
     if not job or job.status != JobStatus.READY or not job.output_path:
         raise HTTPException(status_code=404)
+    if not job_owner_ok(request, job):
+        raise HTTPException(status_code=403)
     url = StorageClient().signed_output_url(job.output_path, expires_in=900)
     return RedirectResponse(url=url, status_code=303)

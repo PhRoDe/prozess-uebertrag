@@ -34,3 +34,4 @@ class Job(BaseModel):
     expires_at: datetime
     processing_node: str | None = None
     processing_started_at: datetime | None = None
+    created_by: str | None = None  # X-Authentik-Username (Phase 4 Owner-Scoping)

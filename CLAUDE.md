@@ -45,7 +45,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 198 Tests müssen grün sein
+.venv/bin/pytest                                  # 209 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -466,6 +466,16 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
   acc_sum steigt, Restposten-Delta schrumpft, Summe bleibt Formel; bei exaktem
   Betrag kein Restposten). `complete_groups` zählt distinkte Lücken-Gruppen
   (kein Namens-Match — gap.group ist roh, consolidated ggf. HGB-umnummeriert).
+- **PDF-Extraktions-Cache** (Phase 4, `PdfCacheRepo` + `pdf_extractions`-Tabelle):
+  `_extract_pdf` cached die rohe Ausgabe je `(sha256(data), claude.model)`. Treffer
+  überspringt ALLE Claude-Calls (Klassifikation + Extraktion + Heilung). Best-effort
+  — Cache-Fehler killen den Job nie (Fallback auf frische Extraktion). Spart v.a.
+  bei Scan-PDF-Re-Runs. Retention: pg_cron prunt >30 Tage (Migration `0004`).
+- **Owner-Scoping** (Phase 4, `jobs.created_by` + `job_owner_ok` in `pages.py`):
+  Upload setzt `created_by` aus `X-Authentik-Username`; job/status/finalize/download
+  geben 403 bei fremdem Job. **Legacy-Jobs ohne `created_by` (vor Migration) bleiben
+  für alle zugänglich** (kein Lockout). RLS ist mit service_role wirkungslos → das
+  Scoping passiert in der App, nicht über RLS.
 - **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
   Nicht blockieren bei großen Scan-Deals, aber User warnen.
 - **Kombiniertes BWA+Susa-Bundle** (Prisma 2026-06): DATEV exportiert BWA-
@@ -492,7 +502,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 198 Tests (Stand 2026-06-13)
+.venv/bin/pytest                      # 209 Tests (Stand 2026-06-13)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 

@@ -6,10 +6,14 @@ from app.models import Job, InputFile, JobStatus
 
 @pytest.fixture(autouse=True)
 def _stub_line_items_repo():
-    """extract_job materialisiert line_items über LineItemsRepo(). In Unit-Tests
-    NIE die echte (network-)Repo konstruieren — sonst Live-DB-Zugriff. Tests, die
-    materialize prüfen, patchen zusätzlich selbst."""
-    with patch("app.worker.tasks.LineItemsRepo"):
+    """extract_job konstruiert LineItemsRepo() + PdfCacheRepo() (beide network).
+    In Unit-Tests NIE die echten Repos bauen — sonst Live-DB-Zugriff. Der Cache
+    wird auf MISS gestellt (get → None), sonst täuschte ein truthy MagicMock
+    einen Cache-Hit vor und überspränge Claude. Tests, die materialize prüfen,
+    patchen zusätzlich selbst."""
+    with patch("app.worker.tasks.LineItemsRepo"), \
+            patch("app.worker.tasks.PdfCacheRepo") as PdfCache:
+        PdfCache.return_value.get.return_value = None
         yield
 
 
@@ -389,3 +393,97 @@ def test_collect_completeness_questions_behaelt_vj_ohne_eigenes_ja():
     ]
     qs = _collect_completeness_questions(extractions)
     assert {q["group"] for q in qs} == {"X"}
+
+
+# --- Phase 4: PDF-Extraktions-Cache in _extract_pdf ---
+
+def test_extract_pdf_cache_hit_ueberspringt_claude():
+    """Cache-Treffer → keine Claude-Calls, gespeicherte Extraktion (Kopie)."""
+    from app.worker import tasks
+    claude = MagicMock()
+    claude.model = "claude-test"
+    cache = MagicMock()
+    cached = [{"type": "jahresabschluss", "groups": []}]
+    cache.get.return_value = cached
+    with patch.object(tasks, "classify_pdf") as classify:
+        out = tasks._extract_pdf(claude, b"PDFBYTES", cache=cache)
+    classify.assert_not_called()             # gar nicht erst klassifiziert
+    claude.classify_document.assert_not_called()
+    assert out == cached
+    assert out is not cached                 # Kopie (extract_job mutiert ['file'])
+
+
+def test_extract_pdf_cache_miss_extrahiert_und_speichert():
+    """Cache-Miss → normale Extraktion, Ergebnis wird gespeichert (put)."""
+    from app.worker import tasks
+    claude = MagicMock()
+    claude.model = "claude-test"
+    claude.classify_document.return_value = "jahresabschluss"
+    claude.extract_text_pdf.return_value = {
+        "type": "jahresabschluss", "year": 2024, "groups": [], "open_questions": []}
+    cache = MagicMock()
+    cache.get.return_value = None
+    with patch.object(tasks, "classify_pdf", return_value=tasks.PdfKind.TEXT), \
+         patch.object(tasks, "extract_text", return_value="text"), \
+         patch.object(tasks, "extract_guv_section", return_value="guv"), \
+         patch.object(tasks, "heal_extraction",
+                      side_effect=lambda ext, fn: (ext, [])):
+        out = tasks._extract_pdf(claude, b"PDFBYTES", cache=cache)
+    assert cache.put.call_args.args[0] == __import__("hashlib").sha256(b"PDFBYTES").hexdigest()
+    # Modell-Key trägt die Pipeline-Cache-Version (Logik-Änderung invalidiert)
+    assert cache.put.call_args.args[1] == f"claude-test:v{tasks._CACHE_VERSION}"
+    assert cache.put.call_args.args[2] == out
+
+
+def test_extract_pdf_cached_key_konsistent_get_und_put():
+    """get und put nutzen denselben versionierten Modell-Key."""
+    from app.worker import tasks
+    claude = MagicMock(); claude.model = "claude-test"
+    claude.classify_document.return_value = "jahresabschluss"
+    claude.extract_text_pdf.return_value = {
+        "type": "jahresabschluss", "year": 2024, "groups": [], "open_questions": []}
+    cache = MagicMock(); cache.get.return_value = None
+    with patch.object(tasks, "classify_pdf", return_value=tasks.PdfKind.TEXT), \
+         patch.object(tasks, "extract_text", return_value="t"), \
+         patch.object(tasks, "extract_guv_section", return_value="g"), \
+         patch.object(tasks, "heal_extraction", side_effect=lambda ext, fn: (ext, [])):
+        tasks._extract_pdf(claude, b"X", cache=cache)
+    assert cache.get.call_args.args[1] == cache.put.call_args.args[1]
+
+
+def test_extract_pdf_cached_nur_saubere_extraktion():
+    """Extraktion mit verbleibenden _unresolved_gaps wird NICHT gecached —
+    sonst friert ein transienter Heilungs-Fehler 30 Tage ein (Code-Review)."""
+    from app.worker import tasks
+    claude = MagicMock(); claude.model = "claude-test"
+    claude.classify_document.return_value = "jahresabschluss"
+    claude.extract_text_pdf.return_value = {
+        "type": "jahresabschluss", "year": 2024, "groups": [], "open_questions": []}
+    cache = MagicMock(); cache.get.return_value = None
+    with patch.object(tasks, "classify_pdf", return_value=tasks.PdfKind.TEXT), \
+         patch.object(tasks, "extract_text", return_value="t"), \
+         patch.object(tasks, "extract_guv_section", return_value="g"), \
+         patch.object(tasks, "heal_extraction",
+                      side_effect=lambda ext, fn: (ext, [{"group": "X", "diff": 5.0}])):
+        tasks._extract_pdf(claude, b"X", cache=cache)
+    cache.put.assert_not_called()
+
+
+def test_extract_pdf_cache_fehler_faellt_auf_extraktion_zurueck():
+    """Cache-get wirft → Job läuft trotzdem (graceful), Extraktion normal."""
+    from app.worker import tasks
+    claude = MagicMock()
+    claude.model = "claude-test"
+    claude.classify_document.return_value = "jahresabschluss"
+    claude.extract_text_pdf.return_value = {
+        "type": "jahresabschluss", "year": 2024, "groups": [], "open_questions": []}
+    cache = MagicMock()
+    cache.get.side_effect = RuntimeError("cache down")
+    cache.put.side_effect = RuntimeError("cache down")
+    with patch.object(tasks, "classify_pdf", return_value=tasks.PdfKind.TEXT), \
+         patch.object(tasks, "extract_text", return_value="text"), \
+         patch.object(tasks, "extract_guv_section", return_value="guv"), \
+         patch.object(tasks, "heal_extraction",
+                      side_effect=lambda ext, fn: (ext, [])):
+        out = tasks._extract_pdf(claude, b"PDFBYTES", cache=cache)
+    assert out[0]["type"] == "jahresabschluss"

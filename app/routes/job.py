@@ -4,7 +4,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.db import JobsRepo, completeness_summary
 from app.models import JobStatus
-from app.routes.pages import require_auth
+from app.routes.pages import require_auth, job_owner_ok
 from app.worker.tasks import finalize_job
 
 router = APIRouter()
@@ -34,6 +34,8 @@ def job_page(request: Request, job_id: str):
     job = JobsRepo().get(job_id)
     if not job:
         raise HTTPException(status_code=404)
+    if not job_owner_ok(request, job):
+        raise HTTPException(status_code=403)
     return templates.TemplateResponse(request, "job.html", {"job": job})
 
 
@@ -44,6 +46,8 @@ def job_status(request: Request, job_id: str):
     job = JobsRepo().get(job_id)
     if not job:
         raise HTTPException(status_code=404)
+    if not job_owner_ok(request, job):
+        raise HTTPException(status_code=403)
     partial = STATUS_TO_PARTIAL[job.status]
     # Gruppennamen für den Review-Dropdown kommen jetzt aus der konsolidierten
     # Struktur (dynamisch aus den PDFs), nicht mehr aus fester Hierarchie.
@@ -140,6 +144,8 @@ async def job_finalize(request: Request, job_id: str, background: BackgroundTask
     job = JobsRepo().get(job_id)
     if not job:
         raise HTTPException(status_code=404)
+    if not job_owner_ok(request, job):
+        raise HTTPException(status_code=403)
 
     background.add_task(finalize_job, job_id, review)
     # Update status immediately so the partial shows the spinner on next poll

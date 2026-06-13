@@ -54,8 +54,9 @@ async def upload(
     repo = JobsRepo()
     storage = StorageClient()
 
-    # Initialer Create mit leeren Dateien — wir brauchen die Job-ID für den Storage-Pfad
-    job = repo.create([])
+    # Initialer Create mit leeren Dateien — wir brauchen die Job-ID für den Storage-Pfad.
+    # created_by aus dem Authentik-Header → Owner-Scoping (Phase 4).
+    job = repo.create([], created_by=request.headers.get("X-Authentik-Username"))
 
     input_files: list[InputFile] = []
     try:

@@ -12,13 +12,15 @@ class JobsRepo:
         self.client = client or create_client(s.supabase_url, s.supabase_service_key)
         self._expiry_hours = s.job_expiry_hours
 
-    def create(self, input_files: list[InputFile]) -> Job:
+    def create(self, input_files: list[InputFile],
+               created_by: str | None = None) -> Job:
         now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=self._expiry_hours)
         row = {
             "status": JobStatus.UPLOADED.value,
             "input_files": [f.model_dump() for f in input_files],
             "expires_at": expires.isoformat(),
+            "created_by": created_by,
         }
         resp = self.client.table("jobs").insert(row).execute()
         return self._row_to_job(resp.data[0])
@@ -210,3 +212,30 @@ class LineItemsRepo:
             self.client.table("line_items").insert(line_items).execute()
         if group_rows:
             self.client.table("line_item_groups").insert(group_rows).execute()
+
+
+class PdfCacheRepo:
+    """Inhalts-adressierter Cache der rohen _extract_pdf-Ausgabe (Phase 4).
+    Key = (pdf_hash, model). Spart teure Claude-Calls bei Re-Uploads/Re-Runs.
+    Best-effort: Aufrufer fangen Fehler ab — ein Cache-Ausfall darf den Job
+    NICHT scheitern lassen."""
+
+    def __init__(self, client: Client | None = None) -> None:
+        s = get_settings()
+        self.client = client or create_client(s.supabase_url, s.supabase_service_key)
+
+    def get(self, pdf_hash: str, model: str) -> list[dict] | None:
+        resp = (self.client.table("pdf_extractions")
+                .select("extractions")
+                .eq("pdf_hash", pdf_hash).eq("model", model)
+                .execute())
+        if resp.data:
+            return resp.data[0]["extractions"]
+        return None
+
+    def put(self, pdf_hash: str, model: str, extractions: list[dict]) -> None:
+        # upsert (idempotent gegen konkurrierende Worker / Wiederholungen).
+        self.client.table("pdf_extractions").upsert(
+            {"pdf_hash": pdf_hash, "model": model, "extractions": extractions},
+            on_conflict="pdf_hash,model",
+        ).execute()

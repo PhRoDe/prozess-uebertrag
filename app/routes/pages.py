@@ -20,6 +20,21 @@ def current_user(request: Request) -> dict:
     }
 
 
+def job_owner_ok(request: Request, job) -> bool:
+    """Darf der aktuelle User auf den Job zugreifen? (Phase 4 Owner-Scoping)
+
+    Legacy-Jobs ohne created_by (vor der Migration angelegt) bleiben für alle
+    authentifizierten User zugänglich — kein Lockout. RLS ist mit dem
+    service_role-Key wirkungslos, daher passiert das Scoping hier in der App.
+    """
+    owner = getattr(job, "created_by", None)
+    # NUR NULL (Legacy vor Migration) ist offen. Ein leerer String würde sonst
+    # alle Jobs öffnen (IDOR) — daher strikt `is None` (Code-Review).
+    if owner is None:
+        return True
+    return owner == current_user(request)["username"]
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     # Authentik already gates this route; just render the upload screen.
