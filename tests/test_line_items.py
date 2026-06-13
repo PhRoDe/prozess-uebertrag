@@ -211,3 +211,104 @@ def test_completeness_summary_kein_widerspruch_bei_umnummerierung():
     s = completeness_summary(cons)
     assert s["has_gaps"] is True
     assert s["complete_groups"] < s["total_groups"]
+
+
+def test_completeness_summary_reichert_target_group_und_col_an():
+    """Phase 3b: jede Lücke bekommt target_group (Name-Match gegen consolidated)
+    + target_col (Jahr→Spalten-Index) als Vorbelegung fürs Korrektur-Dropdown.
+    Plus columns/all_groups-Listen für die Selects."""
+    from app.db import completeness_summary
+    cons = {
+        "columns": [{"label": "2023", "year": 2023}, {"label": "2024", "year": 2024}],
+        "groups": [{"name": "8. Abschreibungen"}, {"name": "1. Umsatzerlöse"}],
+        "questions": [{"type": "completeness_gap", "group": "Abschreibungen",
+                       "year": 2024, "diff": 100.0}],
+    }
+    s = completeness_summary(cons)
+    g = s["gaps"][0]
+    assert g["target_group"] == "8. Abschreibungen"  # Substring-Match
+    assert g["target_col"] == 1                        # Jahr 2024 → idx 1
+    assert [c["idx"] for c in s["columns"]] == [0, 1]
+    assert s["all_groups"] == ["8. Abschreibungen", "1. Umsatzerlöse"]
+
+
+def test_completeness_summary_target_group_none_wenn_kein_match():
+    from app.db import completeness_summary
+    cons = {
+        "columns": [{"label": "2024", "year": 2024}],
+        "groups": [{"name": "1. Umsatzerlöse"}],
+        "questions": [{"type": "completeness_gap", "group": "Völlig anders",
+                       "year": 2024, "diff": 5.0}],
+    }
+    s = completeness_summary(cons)
+    assert s["gaps"][0]["target_group"] is None
+
+
+def test_completeness_summary_dropdown_nur_ja_spalten_und_leaf_gruppen():
+    """Codex P2: Korrektur-Dropdown darf nur JA-Spalten (completeness_gap kommt
+    aus JA-Gruppensummen) und nur Leaf-Gruppen anbieten — BWA/Susa-Spalten und
+    Parent-Gruppen würden vom Builder verworfen/falsch angewandt."""
+    from app.db import completeness_summary
+    cons = {
+        "columns": [
+            {"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024},
+            {"label": "BWA 2025", "kind": "bwa", "doc_type": "bwa", "year": 2025},
+            {"label": "Susa 2025", "kind": "bwa", "doc_type": "susa", "year": 2025},
+        ],
+        "groups": [
+            {"name": "4. Materialaufwand"},  # Parent
+            {"name": "4. a) RHB", "sub_group_of": "4. Materialaufwand"},  # Leaf
+            {"name": "1. Umsatz"},  # Leaf
+        ],
+        "questions": [{"type": "completeness_gap", "group": "4. a) RHB",
+                       "year": 2024, "diff": 10.0}],
+    }
+    s = completeness_summary(cons)
+    assert [c["label"] for c in s["columns"]] == ["2024"]   # nur JA-Spalte
+    assert [c["idx"] for c in s["columns"]] == [0]          # globaler Index erhalten
+    assert "4. Materialaufwand" not in s["all_groups"]      # Parent raus
+    assert s["all_groups"] == ["4. a) RHB", "1. Umsatz"]
+    assert s["gaps"][0]["target_col"] == 0
+    assert s["gaps"][0]["target_group"] == "4. a) RHB"
+
+
+def test_completeness_summary_target_group_parent_wird_none():
+    """Eine Lücke auf einer Parent-Gruppe darf nicht auf den Parent vorbelegt
+    werden (der wird verworfen) → target_group None → leerer Platzhalter."""
+    from app.db import completeness_summary
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [{"name": "4. Materialaufwand"},
+                   {"name": "4. a) RHB", "sub_group_of": "4. Materialaufwand"}],
+        "questions": [{"type": "completeness_gap", "group": "4. Materialaufwand",
+                       "year": 2024, "diff": 10.0}],
+    }
+    s = completeness_summary(cons)
+    assert s["gaps"][0]["target_group"] is None
+
+
+def test_completeness_summary_diff_aus_konsolidierter_spalte():
+    """Codex P2: Anzeige/Prefill-Betrag aus der KONSOLIDIERTEN Ziel-Spalte
+    (post-Normalisierung, JSONB-String-Keys), nicht aus dem pre-merge verify-diff.
+    Konsolidiert bereits geschlossene Lücken werden nicht mehr gelistet."""
+    from app.db import completeness_summary
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "8. Abschreibungen", "column_sums": {"0": 1000.0},
+             "accounts": [{"konto_nr": "4830", "values": {"0": 900.0}}]},
+            {"name": "9. Schon voll", "column_sums": {"0": 500.0},
+             "accounts": [{"konto_nr": "x", "values": {"0": 500.0}}]},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "8. Abschreibungen", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 111.0, "diff": 889.0},  # stale verify
+            {"type": "completeness_gap", "group": "9. Schon voll", "year": 2024,
+             "printed_sum": 500.0, "acc_sum": 0.0, "diff": 500.0},  # konsolidiert 0
+        ],
+    }
+    s = completeness_summary(cons)
+    g1 = next(g for g in s["gaps"] if g["target_group"] == "8. Abschreibungen")
+    assert g1["diff"] == 100.0       # 1000 - 900 (konsolidiert), nicht 889
+    assert g1["acc_sum"] == 900.0
+    assert all(g["target_group"] != "9. Schon voll" for g in s["gaps"])  # gedroppt

@@ -816,3 +816,221 @@ def test_rohergebnis_format_uses_column_sums_when_no_accounts():
     loehne_row = _find_row(ws, "  2. Personalaufwand a) Löhne")
     assert ws.cell(loehne_row, 3).value == 560694.45, \
         f"Löhne-Zelle sollte 560.694,45 sein, ist {ws.cell(loehne_row, 3).value}"
+
+
+# --- Phase 3b: manuell nachgetragene Konten ---
+
+def test_apply_manual_accounts_schliesst_luecke_kein_restposten():
+    from app.excel.builder import _apply_manual_accounts
+    groups = [{"name": "8. Abschreibungen", "column_sums": {0: 1000.0},
+               "accounts": [{"konto_nr": "4830", "bezeichnung": "AfA",
+                             "values": {0: 900.0}}]}]
+    cols = [{"label": "2024", "year": 2024}]
+    g2 = _apply_manual_accounts(groups, [{"group": "8. Abschreibungen", "col_idx": 0,
+                                          "bezeichnung": "AfA GWG", "betrag": 100.0}], cols)
+    names = [a["bezeichnung"] for a in g2[0]["accounts"]]
+    assert "AfA GWG" in names
+    # acc_sum jetzt 1000 == pdf_sum → Restposten ergänzt nichts mehr
+    g3 = _inject_restposten_accounts(g2)
+    rest = [a for a in g3[0]["accounts"] if a.get("confidence") == "synthetic"]
+    assert rest == []
+
+
+def test_apply_manual_accounts_teilbetrag_restposten_schrumpft():
+    from app.excel.builder import _apply_manual_accounts
+    groups = [{"name": "8. Abschreibungen", "column_sums": {0: 1000.0},
+               "accounts": [{"konto_nr": "4830", "bezeichnung": "AfA",
+                             "values": {0: 900.0}}]}]
+    cols = [{"label": "2024", "year": 2024}]
+    g2 = _apply_manual_accounts(groups, [{"group": "8. Abschreibungen", "col_idx": 0,
+                                          "bezeichnung": "AfA GWG", "betrag": 60.0}], cols)
+    g3 = _inject_restposten_accounts(g2)
+    rest = [a for a in g3[0]["accounts"] if a.get("confidence") == "synthetic"]
+    assert len(rest) == 1
+    assert rest[0]["values"][0] == 40.0  # 1000 - (900+60)
+
+
+def test_apply_manual_accounts_ignoriert_ungueltige():
+    from app.excel.builder import _apply_manual_accounts
+    groups = [{"name": "8. Abschreibungen", "column_sums": {0: 1000.0},
+               "accounts": [{"konto_nr": "4830", "bezeichnung": "AfA",
+                             "values": {0: 900.0}}]}]
+    cols = [{"label": "2024", "year": 2024}]
+    g2 = _apply_manual_accounts(groups, [
+        {"group": "GIBTSNICHT", "col_idx": 0, "betrag": 50.0},   # unbekannte Gruppe
+        {"group": "8. Abschreibungen", "col_idx": 9, "betrag": 50.0},  # col out of range
+        {"group": "8. Abschreibungen", "col_idx": 0, "betrag": None},  # kein Betrag
+    ], cols)
+    assert len(g2[0]["accounts"]) == 1  # nichts ergänzt
+
+
+def test_apply_manual_accounts_leer_no_op():
+    from app.excel.builder import _apply_manual_accounts
+    groups = [{"name": "X", "accounts": []}]
+    assert _apply_manual_accounts(groups, [], []) is groups
+
+
+def test_build_excel_manual_account_flow_kein_restposten():
+    """End-to-end: review_answers['_manual_accounts'] fließt durch build_excel,
+    das manuelle Konto landet im Sheet, schließt die Lücke exakt → kein
+    Restposten, Gruppen-Summe bleibt Formel."""
+    consolidated = {
+        "columns": [{"label": "2024", "kind": "ja", "year": 2024,
+                     "sign_convention": "expenses_negative"}],
+        "groups": [{"name": "8. Abschreibungen", "gkv_section": "abschreibungen",
+                    "type": "aufwand", "column_sums": {0: 1000.0},
+                    "accounts": [{"konto_nr": "4830", "bezeichnung": "AfA",
+                                  "values": {0: 900.0}}]}],
+    }
+    xlsx = build_excel(consolidated, review_answers={"_manual_accounts": [
+        {"group": "8. Abschreibungen", "col_idx": 0,
+         "bezeichnung": "AfA GWG", "betrag": 100.0}]})
+    wb = load_workbook(io.BytesIO(xlsx))
+    ws = wb.active
+    bez = [ws.cell(r, 2).value for r in range(1, ws.max_row + 1)]
+    assert any(c and "AfA GWG" in str(c) for c in bez)  # ggf. eingerückt
+    assert not any(c and "Restposten" in str(c) for c in bez)
+
+
+# --- Phase 3b: Fragen-Sheet nach manueller Korrektur reconcilen ---
+# reconcile rechnet das ECHTE Residuum der Ziel-Gruppe (column_sum - eigene
+# Konten inkl. manuell, ohne Restposten) und keyt per eindeutigem gap_index.
+
+def _grp(acc_900, manual=None):
+    accs = [{"konto_nr": "4830", "values": {0: acc_900}}]
+    if manual is not None:
+        accs.append({"bezeichnung": "manuell", "values": {0: manual},
+                     "confidence": "manual"})
+    return [{"name": "8. Abschreibungen", "column_sums": {0: 1000.0}, "accounts": accs}]
+
+def _gap_q():
+    return [{"type": "completeness_gap", "group": "Abschreibungen", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 900.0, "diff": 100.0}]
+
+def _man(betrag, gap_index=0):
+    return {"group": "8. Abschreibungen", "col_idx": 0, "betrag": betrag,
+            "gap_index": gap_index}
+
+def test_reconcile_dropt_wenn_residuum_null():
+    from app.excel.builder import _reconcile_completeness_questions
+    out = _reconcile_completeness_questions(_gap_q(), _grp(900.0, manual=100.0), [_man(100.0)])
+    assert out == []
+
+def test_reconcile_teilbetrag_aktualisiert_aus_residuum():
+    from app.excel.builder import _reconcile_completeness_questions
+    out = _reconcile_completeness_questions(_gap_q(), _grp(900.0, manual=60.0), [_man(60.0)])
+    assert len(out) == 1
+    assert out[0]["diff"] == 40.0          # 1000 - (900+60)
+    assert out[0]["acc_sum"] == 960.0
+
+def test_reconcile_unangetastet_ohne_manual():
+    from app.excel.builder import _reconcile_completeness_questions
+    assert _reconcile_completeness_questions(_gap_q(), _grp(900.0), []) == _gap_q()
+
+def test_build_excel_fragen_konsistent_zu_review_panel():
+    """Codex P2: das Fragen-Sheet muss zur Review-Panel-Liste konsistent sein.
+    Eine korrigierte Lücke verschwindet, eine unkorrigierte bleibt, andere
+    Fragen (unmatched_account) überleben — kein stale completeness_gap."""
+    from app.completeness import completeness_gaps
+    consolidated = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024,
+                     "sign_convention": "expenses_negative"}],
+        "groups": [
+            {"name": "8. Abschreibungen", "gkv_section": "abschreibungen",
+             "type": "aufwand", "column_sums": {0: 1000.0},
+             "accounts": [{"konto_nr": "4830", "bezeichnung": "AfA", "values": {0: 900.0}}]},
+            {"name": "7. Sonstige", "gkv_section": "sonst_betr_aufw",
+             "type": "aufwand", "column_sums": {0: 500.0},
+             "accounts": [{"konto_nr": "6800", "bezeichnung": "Büro", "values": {0: 400.0}}]},
+        ],
+        "questions": [
+            {"type": "unmatched_account", "konto_nr": "9", "bezeichnung": "?", "year": 2024},
+            {"type": "completeness_gap", "group": "8. Abschreibungen", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 900.0, "diff": 100.0},
+            {"type": "completeness_gap", "group": "7. Sonstige", "year": 2024,
+             "printed_sum": 500.0, "acc_sum": 400.0, "diff": 100.0},
+        ],
+    }
+    # canonical: zwei Lücken, in Reihenfolge → gap_index 0 = Abschreibungen
+    cg = completeness_gaps(consolidated)
+    assert [g["group"] for g in cg] == ["8. Abschreibungen", "7. Sonstige"]
+    # User korrigiert NUR gap_index 0 (Abschreibungen) voll
+    xlsx = build_excel(consolidated, review_answers={"_manual_accounts": [
+        {"group": "8. Abschreibungen", "col_idx": 0, "bezeichnung": "AfA GWG",
+         "betrag": 100.0, "gap_index": 0}]})
+    wb = load_workbook(io.BytesIO(xlsx))
+    fragen = "\n".join(str(c.value) for row in wb["Fragen"].iter_rows()
+                       for c in row if c.value)
+    assert "8. Abschreibungen" not in fragen   # korrigiert → weg
+    assert "7. Sonstige" in fragen             # unkorrigiert → bleibt
+    assert "Konto 9" in fragen or "'?'" in fragen  # unmatched_account überlebt
+
+def test_reconcile_keyed_per_index_nicht_gruppe():
+    """Codex P3: zwei Lücken mit gleichem Gruppe+Jahr — eine Korrektur (gap_index
+    0) darf nur DIESE Warnung entfernen, nicht beide."""
+    from app.excel.builder import _reconcile_completeness_questions
+    q = [{"type": "completeness_gap", "group": "A", "year": 2024,
+          "printed_sum": 100.0, "acc_sum": 0.0, "diff": 100.0},
+         {"type": "completeness_gap", "group": "A", "year": 2024,
+          "printed_sum": 100.0, "acc_sum": 0.0, "diff": 100.0}]
+    groups = [{"name": "A", "column_sums": {0: 100.0},
+               "accounts": [{"values": {0: 100.0}, "confidence": "manual"}]}]
+    out = _reconcile_completeness_questions(q, groups, [{"group": "A", "col_idx": 0,
+                                                         "betrag": 100.0, "gap_index": 0}])
+    assert len(out) == 1  # nur die korrigierte (index 0) raus
+
+def test_build_excel_manual_account_auf_parent_wird_ignoriert():
+    """Codex P1: ein manuelles Konto auf einem Parent (mit Sub-Gruppen) würde
+    dessen Sum-Rendering kippen + Kinder doppelt zählen. Parent-Targets müssen
+    verworfen werden — das Konto darf NICHT auftauchen, Parent bleibt Kaskade."""
+    consolidated = {
+        "columns": [{"label": "2024", "kind": "ja", "year": 2024,
+                     "sign_convention": "expenses_negative"}],
+        "groups": [
+            {"name": "4. Materialaufwand", "gkv_section": "materialaufwand_rhb",
+             "type": "aufwand", "sub_group_of": None,
+             "column_sums": {0: 1000.0}, "accounts": []},
+            {"name": "4. a) RHB", "type": "aufwand", "sub_group_of": "4. Materialaufwand",
+             "column_sums": {0: 1000.0},
+             "accounts": [{"konto_nr": "5100", "bezeichnung": "RHB", "values": {0: 900.0}}]},
+        ],
+    }
+    xlsx = build_excel(consolidated, review_answers={"_manual_accounts": [
+        {"group": "4. Materialaufwand", "col_idx": 0, "bezeichnung": "PARENT-KONTO",
+         "betrag": 100.0, "gap_group_orig": "4. Materialaufwand", "gap_year_orig": "2024"}]})
+    ws = load_workbook(io.BytesIO(xlsx)).active
+    bez = [ws.cell(r, 2).value for r in range(1, ws.max_row + 1)]
+    assert not any(c and "PARENT-KONTO" in str(c) for c in bez), \
+        "manuelles Konto darf nicht in eine Parent-Gruppe injiziert werden"
+    # Parent-Sum referenziert die Kinder-Sumrow (Kaskade), kein =SUM eigener Konten
+    parent_row = _find_row(ws, "4. Materialaufwand")
+    child_row = _find_row(ws, "  4. a) RHB")
+    assert parent_row and child_row
+    pf = ws.cell(parent_row, 3).value
+    assert isinstance(pf, str) and f"C{child_row}" in pf
+
+
+def test_match_group_name_mehrdeutig_gibt_none():
+    """Code-Review R5: bidirektionaler Substring-Match darf bei MEHREREN Treffern
+    nicht raten — sonst bindet die Lücke an die falsche Gruppe (recompute → ggf.
+    stilles Droppen). >1 Treffer → None (User wählt selbst)."""
+    from app.completeness import _match_group_name
+    assert _match_group_name("Abschreibungen",
+                             ["7. Abschreibungen Sachanlagen", "7a. Abschreibungen GWG"]) is None
+    assert _match_group_name("Abschreibungen",
+                             ["8. Abschreibungen", "1. Umsatz"]) == "8. Abschreibungen"
+    # exakter Match gewinnt auch bei zusätzlichem Substring-Kandidaten
+    assert _match_group_name("8. X", ["8. X", "8. X Sub"]) == "8. X"
+
+
+def test_reconcile_updated_gap_konsistent_zur_gruppe():
+    """Code-Review R5: bei Teilkorrektur kommen printed_sum/acc_sum/diff aus der
+    KONSOLIDIERTEN Gruppe (nicht aus stale gap.printed_sum 'or 0.0'). Sonst
+    negativer/inkonsistenter acc_sum im Fragen-Sheet."""
+    from app.excel.builder import _reconcile_completeness_questions
+    questions = [{"type": "completeness_gap", "group": "Abschreibungen", "year": 2024,
+                  "printed_sum": None, "acc_sum": None, "diff": 100.0}]
+    out = _reconcile_completeness_questions(questions, _grp(900.0, manual=60.0), [_man(60.0)])
+    assert out[0]["printed_sum"] == 1000.0
+    assert out[0]["acc_sum"] == 960.0
+    assert out[0]["diff"] == 40.0

@@ -1,57 +1,91 @@
 {% set open_questions = job.extraction.open_questions if job.extraction else [] %}
 <div id="job-state">
-{% if completeness %}
-<div class="bg-white rounded-lg shadow-sm border p-6 mb-4">
-  <h2 class="text-lg font-semibold mb-1">Vollständigkeits-Check</h2>
-  {% if completeness.has_gaps %}
-    <p class="text-slate-600 text-sm mb-4">
-      {{ completeness.complete_groups }} von {{ completeness.total_groups }} Positionen vollständig.
-      Bei {{ completeness.gaps|length }} Position(en) weicht die Summe der erfassten Konten
-      von der gedruckten Gruppensumme ab — die Differenz wird im Excel als
-      <em>Restposten</em> ausgewiesen, damit die Summe stimmt.
-    </p>
-    <div class="space-y-3">
-      {% for g in completeness.gaps %}
-      <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
-        <div class="flex justify-between items-start">
-          <div>
-            <p class="font-medium">{{ g.group or "—" }}</p>
-            <code class="text-xs text-slate-500">
-              {{ g.year or "" }}{% if g.document %} · {{ g.document }}{% endif %}
-            </code>
+<form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="outerHTML">
+
+  {% if completeness %}
+  <div class="bg-white rounded-lg shadow-sm border p-6 mb-4">
+    <h2 class="text-lg font-semibold mb-1">Vollständigkeits-Check</h2>
+    {% if completeness.has_gaps %}
+      <p class="text-slate-600 text-sm mb-4">
+        {{ completeness.complete_groups }} von {{ completeness.total_groups }} Positionen vollständig.
+        Bei {{ completeness.gaps|length }} Position(en) weicht die Summe der erfassten Konten
+        von der gedruckten Gruppensumme ab. Standard: die Differenz wird als
+        <em>Restposten</em> ausgewiesen. Alternativ kannst du das fehlende Konto
+        direkt nachtragen — die =SUM-Formel zieht es automatisch.
+      </p>
+      <div class="space-y-3">
+        {% for g in completeness.gaps %}
+        {% set i = loop.index0 %}
+        <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
+          <div class="flex justify-between items-start">
+            <div>
+              <p class="font-medium">{{ g.group or "—" }}</p>
+              <code class="text-xs text-slate-500">
+                {{ g.year or "" }}{% if g.document %} · {{ g.document }}{% endif %}
+              </code>
+            </div>
+            <div class="text-right text-sm font-mono">
+              {% if (g.diff or 0) >= 0 %}
+                <div class="text-amber-700">fehlend {{ "%.2f" % (g.diff|abs) }} €</div>
+              {% else %}
+                <div class="text-amber-700">Überhang {{ "%.2f" % (g.diff|abs) }} €</div>
+              {% endif %}
+              <div class="text-xs text-slate-500">
+                gedruckt {{ "%.2f" % (g.printed_sum or 0) }} ·
+                erfasst {{ "%.2f" % (g.acc_sum or 0) }}
+              </div>
+            </div>
           </div>
-          <div class="text-right text-sm font-mono">
-            {% if (g.diff or 0) >= 0 %}
-              <div class="text-amber-700">fehlend {{ "%.2f" % (g.diff|abs) }} €</div>
-            {% else %}
-              <div class="text-amber-700">Überhang {{ "%.2f" % (g.diff|abs) }} €</div>
-            {% endif %}
-            <div class="text-xs text-slate-500">
-              gedruckt {{ "%.2f" % (g.printed_sum or 0) }} ·
-              erfasst {{ "%.2f" % (g.acc_sum or 0) }}
+
+          <div class="mt-3 border-t border-amber-200 pt-3 space-y-2 text-sm">
+            <input type="hidden" name="gap_uid[{{ i }}]" value="{{ i }}">
+            <label class="flex items-center gap-2">
+              <input type="radio" name="gap_action[{{ i }}]" value="accept" checked>
+              Restposten übernehmen <span class="text-slate-400">(Standard)</span>
+            </label>
+            <label class="flex items-center gap-2">
+              <input type="radio" name="gap_action[{{ i }}]" value="correct">
+              Fehlendes Konto nachtragen
+            </label>
+            <div class="grid grid-cols-2 gap-2 pt-1">
+              <input type="text" name="gap_bez[{{ i }}]" placeholder="Bezeichnung"
+                     class="px-2 py-1 border rounded bg-white">
+              <input type="number" step="0.01" name="gap_betrag[{{ i }}]"
+                     value="{{ '%.2f' % (g.diff or 0) }}"
+                     class="px-2 py-1 border rounded bg-white font-mono">
+              <select name="gap_group[{{ i }}]" class="px-2 py-1 border rounded bg-white">
+                <option value="" {% if not g.target_group %}selected{% endif %}>— Gruppe wählen —</option>
+                {% for gn in completeness.all_groups %}
+                  <option value="{{ gn }}" {% if gn == g.target_group %}selected{% endif %}>{{ gn }}</option>
+                {% endfor %}
+              </select>
+              <select name="gap_col[{{ i }}]" class="px-2 py-1 border rounded bg-white">
+                <option value="" {% if g.target_col is none %}selected{% endif %}>— Spalte wählen —</option>
+                {% for c in completeness.columns %}
+                  <option value="{{ c.idx }}" {% if c.idx == g.target_col %}selected{% endif %}>{{ c.label }}</option>
+                {% endfor %}
+              </select>
             </div>
           </div>
         </div>
+        {% endfor %}
       </div>
-      {% endfor %}
-    </div>
-    <p class="text-xs text-slate-400 mt-3">
-      Tipp: fehlt ein ganzer Kontennachweis-Teil, das vollständige PDF erneut hochladen.
-    </p>
-  {% else %}
-    <p class="text-emerald-700 text-sm">
-      ✓ Alle {{ completeness.total_groups }} Positionen vollständig — Konten-Summen
-      stimmen mit den gedruckten Gruppensummen überein.
-    </p>
+      <p class="text-xs text-slate-400 mt-3">
+        Tipp: fehlt ein ganzer Kontennachweis-Teil, das vollständige PDF erneut hochladen.
+      </p>
+    {% else %}
+      <p class="text-emerald-700 text-sm">
+        ✓ Alle {{ completeness.total_groups }} Positionen vollständig — Konten-Summen
+        stimmen mit den gedruckten Gruppensummen überein.
+      </p>
+    {% endif %}
+  </div>
   {% endif %}
-</div>
-{% endif %}
-<div class="bg-white rounded-lg shadow-sm border p-8">
-  {% if open_questions %}
-    <h2 class="text-xl font-semibold mb-2">{{ open_questions|length }} Konten brauchen deine Zuordnung</h2>
-    <p class="text-slate-600 text-sm mb-6">Claude konnte diese Zeilen keiner Gruppe im Kontennachweis zuordnen:</p>
 
-    <form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="outerHTML">
+  <div class="bg-white rounded-lg shadow-sm border p-8">
+    {% if open_questions %}
+      <h2 class="text-xl font-semibold mb-2">{{ open_questions|length }} Konten brauchen deine Zuordnung</h2>
+      <p class="text-slate-600 text-sm mb-6">Claude konnte diese Zeilen keiner Gruppe im Kontennachweis zuordnen:</p>
       <div class="space-y-4">
         {% for q in open_questions %}
         <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
@@ -76,21 +110,15 @@
         </div>
         {% endfor %}
       </div>
+    {% else %}
+      <h2 class="text-xl font-semibold mb-2">Alles klar — keine Rückfragen</h2>
+      <p class="text-slate-600 text-sm">Claude hat alle Konten eindeutig zugeordnet.</p>
+    {% endif %}
 
-      <button type="submit"
-              class="mt-6 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
-        Excel generieren
-      </button>
-    </form>
-  {% else %}
-    <h2 class="text-xl font-semibold mb-2">Alles klar — keine Rückfragen</h2>
-    <p class="text-slate-600 text-sm mb-6">Claude hat alle Konten eindeutig zugeordnet.</p>
-    <form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="outerHTML">
-      <button type="submit"
-              class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
-        Excel generieren
-      </button>
-    </form>
-  {% endif %}
-</div>
+    <button type="submit"
+            class="mt-6 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md w-full">
+      Excel generieren
+    </button>
+  </div>
+</form>
 </div>

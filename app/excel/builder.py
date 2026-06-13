@@ -18,6 +18,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from app.completeness import completeness_gaps, leaf_group_names, _leaf_col_diff
+
 EUR_FORMAT = '#,##0.00;-#,##0.00'
 YELLOW = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
 BOLD = Font(bold=True)
@@ -121,6 +123,11 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
     pdf_jue_per_column = {int(k): v for k, v in
                            (consolidated.get("pdf_jue_per_column") or {}).items()}
     questions = list(consolidated.get("questions") or [])
+    # Kanonische, gefilterte Lücken-Liste — IDENTISCH zur Review-Panel-Anzeige
+    # (vor Manual-Injektion, gleiche Reihenfolge → gap_index gültig). Wird unten
+    # an die manuellen Korrekturen angepasst und ersetzt die rohen
+    # completeness_gap-Fragen im Fragen-Sheet (Codex P2/P3).
+    canonical_gaps = completeness_gaps(consolidated)
     # Endwert-Label aus der Extraktion (z.B. "Steuerlicher Gewinn nach §4 Abs 3
     # EStG" bei EÜR). Wenn gesetzt, nutzen wir es fuer beide Endwert-Zeilen
     # (Excel-Formel + PDF-Anker). Bei HGB-GuV ohne explicit Label bleiben die
@@ -147,6 +154,26 @@ def build_excel(consolidated: dict, review_answers: dict | None = None) -> bytes
 
     # _apply_review routed open-question accounts into named groups
     groups = _apply_review_answers(groups, questions, review_answers)
+
+    # Phase 3b: manuell im Review nachgetragene Konten einspeisen — VOR dem
+    # Restposten, damit die acc_sum steigt und der Restposten-Delta automatisch
+    # schrumpft (bei exaktem Betrag auf 0). Die Gruppen-Summe bleibt Formel.
+    # Manuelle Korrekturen NUR in Leaf-Gruppen (keine Sub-Gruppen darunter):
+    # ein manuelles Konto an einem Parent würde dessen Sum-Rendering von
+    # Kinder-Kaskade auf =SUM(eigene Konten) kippen UND zusätzlich die Kinder
+    # addieren → Doppelzählung (Codex P1). Parent-Targets werden verworfen.
+    leaves = set(leaf_group_names(groups))
+    manual_accounts = [m for m in (review_answers.get("_manual_accounts") or [])
+                       if m.get("group") in leaves]
+    groups = _apply_manual_accounts(groups, manual_accounts, columns)
+    # Fragen-Sheet konsistent zum Review-Panel halten: dieselbe kanonische,
+    # gefilterte Lücken-Liste verwenden (vor Manual-Injektion berechnet, gleiche
+    # Reihenfolge → gap_index gültig), dann an die Korrekturen anpassen und die
+    # alten completeness_gap-Rohfragen damit ersetzen (Codex P2/P3).
+    reconciled_gaps = _reconcile_completeness_questions(
+        canonical_gaps, groups, manual_accounts)
+    questions = [q for q in questions
+                 if q.get("type") != "completeness_gap"] + reconciled_gaps
 
     # Restposten-Konten ergänzen wo column_sum (pdf_sum_gj) von der Konten-
     # Summe abweicht. Damit bleiben die Excel-Gruppen-Summen Formeln (=SUM(...)),
@@ -681,6 +708,80 @@ def _find_bwa_endwert_row(groups: list[dict], group_sum_rows: dict[str, int],
             if pat in name_lc and has_value(name_orig):
                 return group_sum_rows.get(name_orig)
     return None
+
+
+def _reconcile_completeness_questions(canonical_gaps: list[dict], groups: list[dict],
+                                      manual_accounts: list[dict]) -> list[dict]:
+    """Manuelle Korrekturen auf die KANONISCHE Lücken-Liste anwenden (dieselbe
+    geordnete/gefilterte Liste, die das Review-Panel zeigte — Codex P2). Pro
+    korrigierter Lücke (gekeyt per eindeutigem gap_index = Position im Panel,
+    Codex P3) das ECHTE Residuum der Ziel-Gruppe rechnen (column_sum − eigene
+    Konten inkl. der manuell ergänzten, OHNE Restposten = exakt der noch
+    gesetzte Restposten). ≤1 ct → Warnung entfernen, sonst diff/acc_sum darauf.
+
+    Muss NACH _apply_manual_accounts laufen (manuelle Konten sind dann in
+    groups[*].accounts).
+    """
+    if not manual_accounts:
+        return canonical_gaps
+    by_name = {g.get("name"): g for g in groups}
+    # rec = (printed, acc_sum, diff) der Ziel-Gruppe/Spalte NACH Manual-Injektion
+    recomputed: dict[int, tuple] = {}
+    for m in manual_accounts:
+        gi = m.get("gap_index")
+        col = m.get("col_idx")
+        g = by_name.get(m.get("group"))
+        if not isinstance(gi, int) or not isinstance(col, int) or g is None:
+            continue
+        rec = _leaf_col_diff(g, col)
+        if rec is not None:
+            recomputed[gi] = rec
+    out: list[dict] = []
+    for i, gap in enumerate(canonical_gaps):
+        rec = recomputed.get(i)
+        if rec is None:
+            out.append(gap)
+            continue
+        printed, acc, diff = rec
+        if abs(diff) <= 0.01:
+            continue  # Lücke geschlossen → Warnung droppen
+        # printed/acc/diff konsistent aus der konsolidierten Gruppe (nicht aus
+        # stale gap.printed_sum 'or 0.0' — Code-Review R5).
+        out.append({**gap, "printed_sum": printed, "acc_sum": acc, "diff": diff})
+    return out
+
+
+def _apply_manual_accounts(groups: list[dict], manual_accounts: list[dict],
+                           columns: list[dict]) -> list[dict]:
+    """Phase 3b: im Review manuell nachgetragene Konten in die Ziel-Gruppe
+    einspeisen. Jedes manuelle Konto wird als Detailzeile mit
+    values={col_idx: betrag} angehängt — die =SUM-Formel der Gruppe zieht es
+    automatisch, und der nachgelagerte Restposten-Plug schrumpft entsprechend
+    (Summe bleibt Formel, niemals hardcoded).
+
+    Ungültige Einträge (unbekannte Gruppe, col_idx außerhalb, kein Betrag)
+    werden still übersprungen — defensiv, Form-Input ist user-kontrolliert.
+    """
+    if not manual_accounts:
+        return groups
+    by_name = {g.get("name"): g for g in groups}
+    for m in manual_accounts:
+        target = by_name.get(m.get("group"))
+        if target is None:
+            continue
+        betrag = m.get("betrag")
+        if not isinstance(betrag, (int, float)):
+            continue
+        col_idx = m.get("col_idx")
+        if not isinstance(col_idx, int) or not (0 <= col_idx < len(columns)):
+            continue
+        target.setdefault("accounts", []).append({
+            "konto_nr": m.get("konto_nr") or "",
+            "bezeichnung": m.get("bezeichnung") or "Manuell nachgetragen",
+            "values": {col_idx: float(betrag)},
+            "confidence": "manual",
+        })
+    return groups
 
 
 def _apply_review_answers(groups: list[dict], questions: list[dict],

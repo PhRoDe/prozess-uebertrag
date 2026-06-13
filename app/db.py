@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from supabase import create_client, Client
 from app.config import get_settings
+from app.completeness import completeness_gaps, ja_columns, leaf_group_names, _col_get
 from app.models import Job, InputFile, JobStatus
 
 
@@ -75,15 +76,6 @@ class JobsRepo:
 
     def _row_to_job(self, row: dict[str, Any]) -> Job:
         return Job.model_validate(row)
-
-
-def _col_get(d: dict, ci: int):
-    """Spalten-Wert robust holen — int-Key (in-memory) ODER String-Key
-    (falls die Struktur doch mal durch JSONB lief)."""
-    d = d or {}
-    if ci in d:
-        return d[ci]
-    return d.get(str(ci))
 
 
 def project_line_items(job_id: str, consolidated: dict[str, Any]
@@ -172,31 +164,30 @@ def project_line_items(job_id: str, consolidated: dict[str, Any]
 
 
 def completeness_summary(consolidated: dict[str, Any] | None) -> dict[str, Any]:
-    """View-Model fürs read-only Vollständigkeits-Panel (Phase 3a). Rein.
+    """View-Model fürs Vollständigkeits-Panel (Phase 3a/3b). Rein.
 
-    Liest die completeness_gap-Einträge aus consolidated.questions (verbleibende
-    Lücken nach der Selbstheilung) und zählt, wie viele Positionen vollständig
-    sind. Andere Frage-Typen (unmatched_account etc.) werden ignoriert — die
-    laufen über den bestehenden open_questions-Dropdown.
+    Die Lücken-Liste kommt aus `app.completeness.completeness_gaps` — dieselbe
+    Funktion nutzt der Excel-Builder beim Finalisieren, damit Review-Anzeige und
+    Fragen-Sheet konsistent bleiben (gleiche Reihenfolge → gap_index gültig,
+    Codex P2). Hier nur das View-Model drumherum (Zähler + Dropdown-Quellen).
+
+    complete_groups NICHT per Namens-Match: gap.group ist roh, consolidated ggf.
+    HGB-umnummeriert — Match würde "alle vollständig" neben Lücken melden. Daher
+    distinkte Lücken-Gruppen zählen.
     """
     consolidated = consolidated or {}
     groups = consolidated.get("groups") or []
-    questions = consolidated.get("questions") or []
-    gaps = [q for q in questions if q.get("type") == "completeness_gap"]
+    columns = consolidated.get("columns") or []
+    gaps = completeness_gaps(consolidated)
     total_groups = len(groups)
-    # complete_groups NICHT per Namens-Match: gap.group trägt den Roh-
-    # Extraktionsnamen, consolidated.groups ggf. den HGB-umnummerierten —
-    # ein Match würde scheitern und "alle vollständig" neben gelisteten
-    # Lücken melden (Widerspruch, Codex P2). Stattdessen über die Anzahl
-    # distinkter Lücken-Gruppen rechnen (mehrere Perioden derselben Gruppe
-    # zählen einmal).
     gap_group_count = len({g.get("group") for g in gaps})
-    complete_groups = max(0, total_groups - gap_group_count)
     return {
         "gaps": gaps,
         "total_groups": total_groups,
-        "complete_groups": complete_groups,
+        "complete_groups": max(0, total_groups - gap_group_count),
         "has_gaps": bool(gaps),
+        "columns": ja_columns(columns),
+        "all_groups": leaf_group_names(groups),
     }
 
 

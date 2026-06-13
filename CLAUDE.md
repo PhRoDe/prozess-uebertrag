@@ -45,7 +45,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 175 Tests müssen grün sein
+.venv/bin/pytest                                  # 198 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -458,6 +458,14 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
   Nach dem Umbau (PDF-Gliederung 1:1) passiert das selten. Wenn ein
   exotisches PDF reinkommt das Claude nicht einordnet → Review-UI zeigt alle
   Gruppen aus der konsolidierten Struktur als Dropdown.
+- **Vollständigkeits-Panel** (Phase 3a/3b, `completeness_summary` in `db.py`):
+  zeigt im Review-Screen pro Position vollständig vs. Lücke (fehlend/Überhang €
+  + Quelle, aus `completeness_gap` der Selbstheilung). Pro Lücke kann der User
+  das fehlende Konto manuell nachtragen (`gap_*`-Felder → `parse_finalize_form`
+  → `review["_manual_accounts"]` → `_apply_manual_accounts` VOR dem Restposten:
+  acc_sum steigt, Restposten-Delta schrumpft, Summe bleibt Formel; bei exaktem
+  Betrag kein Restposten). `complete_groups` zählt distinkte Lücken-Gruppen
+  (kein Namens-Match — gap.group ist roh, consolidated ggf. HGB-umnummeriert).
 - **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
   Nicht blockieren bei großen Scan-Deals, aber User warnen.
 - **Kombiniertes BWA+Susa-Bundle** (Prisma 2026-06): DATEV exportiert BWA-
@@ -484,7 +492,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 175 Tests (Stand 2026-06-13)
+.venv/bin/pytest                      # 198 Tests (Stand 2026-06-13)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 
