@@ -117,7 +117,10 @@ def project_line_items(job_id: str, consolidated: dict[str, Any]
         accounts = g.get("accounts") or []
         for ci, col in enumerate(columns):
             label = col.get("label")
-            src = col.get("kind")
+            # source_type: doc_type bevorzugen (ja|bwa|susa). Susa-Spalten tragen
+            # consolidate-intern kind='bwa' — ohne doc_type würden Susa-Konten als
+            # BWA gespeichert (Codex P2).
+            src = col.get("doc_type") or col.get("kind")
             printed = _col_get(col_sums, ci)
             own_sum = 0.0
             has_own_value = False
@@ -135,14 +138,28 @@ def project_line_items(job_id: str, consolidated: dict[str, Any]
                     "confidence": acc.get("confidence"),
                     "is_restposten": acc.get("confidence") == "synthetic",
                 })
-            # acc_sum der group-row inkl. Konten der Sub-Gruppen
+            # acc_sum der group-row inkl. Sub-Gruppen. Ein Kind mit eigenen
+            # Konten steuert deren Summe bei; ein summary-only Kind (nur
+            # gedruckte column_sum, keine Konten — DATEV-Kurzform) seine
+            # column_sum (analog verify._group_acc_sum). Sonst Falsch-Lücke
+            # am Parent in v_job_completeness (Codex P2).
             child_sum = 0.0
             has_child_value = False
             for child in children_of.get(gname, []):
+                child_own = 0.0
+                child_has_acc = False
                 for acc in child.get("accounts") or []:
                     v = _col_get(acc.get("values") or {}, ci)
                     if isinstance(v, (int, float)):
-                        child_sum += v
+                        child_own += v
+                        child_has_acc = True
+                if child_has_acc:
+                    child_sum += child_own
+                    has_child_value = True
+                else:
+                    cv = _col_get(child.get("column_sums") or {}, ci)
+                    if isinstance(cv, (int, float)):
+                        child_sum += cv
                         has_child_value = True
             if printed is not None or has_own_value or has_child_value:
                 group_rows.append({

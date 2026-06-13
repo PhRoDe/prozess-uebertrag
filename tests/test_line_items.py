@@ -120,3 +120,42 @@ def test_project_group_acc_sum_includes_children():
     _li, grp = project_line_items("job-1", cons)
     parent = next(g for g in grp if g["group_name"] == "4. Materialaufwand")
     assert parent["acc_sum"] == 300.0  # 200 + 100 (Kinder) → kein Falsch-Diff
+
+
+def test_project_group_acc_sum_includes_summary_only_children():
+    """Codex P2: Kinder, die NUR eine gedruckte column_sum tragen (keine eigenen
+    Konten, DATEV-Summary-only), müssen trotzdem in die Parent-acc_sum fließen —
+    sonst meldet v_job_completeness eine Falsch-Lücke am Parent (analog
+    verify._group_acc_sum)."""
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Materialaufwand", "gkv_section": "materialaufwand_rhb",
+             "column_sums": {0: 300.0}, "accounts": [], "sub_group_of": None},
+            # summary-only: gedruckte Summe, aber keine Einzelkonten
+            {"name": "4. a) RHB", "column_sums": {0: 200.0},
+             "sub_group_of": "4. Materialaufwand", "accounts": []},
+            {"name": "4. b) Bezogene", "column_sums": {0: 100.0},
+             "sub_group_of": "4. Materialaufwand", "accounts": []},
+        ],
+    }
+    _li, grp = project_line_items("job-1", cons)
+    parent = next(g for g in grp if g["group_name"] == "4. Materialaufwand")
+    assert parent["acc_sum"] == 300.0  # 200 + 100 aus summary-only Kindern
+
+
+def test_project_source_type_uses_doc_type_for_susa():
+    """Codex P2: Susa-Spalten tragen kind='bwa' (consolidate-intern), aber das
+    Audit-Schema unterscheidet ja|bwa|susa. source_type muss doc_type bevorzugen,
+    damit Susa-Konten nicht als BWA gespeichert werden."""
+    cons = {
+        "columns": [{"label": "Susa Dez 2025", "kind": "bwa",
+                     "doc_type": "susa", "year": 2025}],
+        "groups": [
+            {"name": "Klasse 4", "gkv_section": None, "column_sums": {0: 50.0},
+             "accounts": [{"konto_nr": "4100", "bezeichnung": "x",
+                           "values": {0: 50.0}, "confidence": "high"}]},
+        ],
+    }
+    li, _grp = project_line_items("job-1", cons)
+    assert li[0]["source_type"] == "susa"

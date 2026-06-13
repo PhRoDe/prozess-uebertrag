@@ -254,7 +254,8 @@ def _build_columns(ja_docs: list[dict], bwa_docs: list[dict]) -> list[dict]:
         sign = (match.get("sign_convention", default_sign) if match
                 else default_sign)
         entries.append((y, 0, {
-            "label": str(y), "kind": "ja", "year": y, "sign_convention": sign,
+            "label": str(y), "kind": "ja", "doc_type": "ja",
+            "year": y, "sign_convention": sign,
         }))
     for d in bwa_docs:
         y = d.get("year")
@@ -263,7 +264,7 @@ def _build_columns(ja_docs: list[dict], bwa_docs: list[dict]) -> list[dict]:
         default_label = f"Susa {y}" if d.get("type") == "susa" else f"BWA {y}"
         entries.append((y, 1, {
             "label": d.get("period_label") or default_label,
-            "kind": "bwa", "year": y,
+            "kind": "bwa", "doc_type": d.get("type") or "bwa", "year": y,
             "sign_convention": d.get("sign_convention", default_sign),
         }))
     entries.sort(key=lambda t: (t[0], t[1]))

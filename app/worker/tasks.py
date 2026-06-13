@@ -84,6 +84,34 @@ def _extract_pdf(claude: ClaudeClient, data: bytes) -> list[dict]:
     return [healed]
 
 
+def _collect_completeness_questions(extractions: list[dict]) -> list[dict]:
+    """Verbleibende Vollständigkeits-Lücken (nach der Selbstheilung) als
+    completeness_gap fürs Fragen-Sheet sammeln.
+
+    Filtert VJ-Lücken heraus, deren Jahr ein eigenes JA hat: die Konsolidierung
+    nimmt für ein Jahr mit eigenem JA dessen Werte (setdefault) und ignoriert die
+    VJ-Spalte des jüngeren Docs — eine VJ-Lücke dort betrifft Daten, die das
+    Excel gar nicht verwendet, und wäre ein Fehlalarm (Codex P2).
+    """
+    own_years = {d.get("year") for d in extractions
+                 if d.get("type") == "jahresabschluss" and d.get("year") is not None}
+    questions: list[dict] = []
+    for doc in extractions:
+        for gap in doc.get("_unresolved_gaps", []):
+            if gap.get("period") == "vj" and gap.get("year") in own_years:
+                continue
+            questions.append({
+                "type": "completeness_gap",
+                "group": gap.get("group"),
+                "year": gap.get("year"),
+                "printed_sum": gap.get("printed_sum"),
+                "acc_sum": gap.get("acc_sum"),
+                "diff": gap.get("diff"),
+                "document": doc.get("file"),
+            })
+    return questions
+
+
 def extract_job(job_id: str) -> None:
     """Extract all input PDFs for a job via Claude. Idempotent + claim-safe."""
     repo = JobsRepo()
@@ -121,18 +149,11 @@ def extract_job(job_id: str) -> None:
         # Verbleibende Vollständigkeits-Lücken (nach der Selbstheilung) sichtbar
         # machen: als completeness_gap ins Fragen-Sheet (consolidated.questions).
         # Sonst füllt der Excel-Builder still einen Restposten und der User sieht
-        # die fehlenden Konten nie (Codex-Finding P2-6).
-        for doc in extractions:
-            for gap in doc.get("_unresolved_gaps", []):
-                consolidated.setdefault("questions", []).append({
-                    "type": "completeness_gap",
-                    "group": gap.get("group"),
-                    "year": gap.get("year"),
-                    "printed_sum": gap.get("printed_sum"),
-                    "acc_sum": gap.get("acc_sum"),
-                    "diff": gap.get("diff"),
-                    "document": doc.get("file"),
-                })
+        # die fehlenden Konten nie (Codex-Finding P2-6). Ignorierte VJ-Lücken
+        # werden in _collect_completeness_questions herausgefiltert.
+        gap_questions = _collect_completeness_questions(extractions)
+        if gap_questions:
+            consolidated.setdefault("questions", []).extend(gap_questions)
         # open_questions für Review-Screen: nur aus der jüngsten JA (die ist am relevantesten).
         # Claude liefert open_questions manchmal als String statt Dict (z.B. "Diese PDF ist
         # eine EÜR ohne erkennbare GuV-Gruppen"). String-Hinweise als hint-only-Eintraege

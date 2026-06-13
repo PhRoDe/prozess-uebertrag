@@ -355,3 +355,37 @@ def test_extract_materializes_line_items_and_survives_its_failure():
         failed = [c for c in repo.set_status.call_args_list
                   if len(c.args) >= 2 and c.args[1] == JobStatus.FAILED]
         assert not failed, f"Job sollte nicht failen: {failed}"
+
+
+def test_collect_completeness_questions_filtert_ignorierte_vj_luecken():
+    """Codex P2: Multi-Jahr — eine VJ-Lücke aus dem jüngeren JA für ein Jahr,
+    das ein eigenes JA hat, ist KEIN echtes Problem (Konsolidierung ignoriert
+    diese VJ-Werte). Darf nicht als completeness_gap erscheinen."""
+    from app.worker.tasks import _collect_completeness_questions
+    extractions = [
+        {"type": "jahresabschluss", "year": 2024, "file": "ja2024.pdf",
+         "_unresolved_gaps": [
+             {"group": "X", "period": "vj", "year": 2023, "diff": 100.0},
+             {"group": "Y", "period": "gj", "year": 2024, "diff": 50.0},
+         ]},
+        {"type": "jahresabschluss", "year": 2023, "file": "ja2023.pdf"},
+    ]
+    qs = _collect_completeness_questions(extractions)
+    groups = {q["group"] for q in qs}
+    assert "X" not in groups  # eigenes JA 2023 vorhanden → VJ-Lücke unterdrückt
+    assert "Y" in groups      # GJ-Lücke bleibt sichtbar
+    assert all(q["type"] == "completeness_gap" for q in qs)
+
+
+def test_collect_completeness_questions_behaelt_vj_ohne_eigenes_ja():
+    """VJ-Lücke für ein Jahr OHNE eigenes JA (existiert nur als Vorjahr) bleibt
+    sichtbar — dort nutzt die Konsolidierung die VJ-Werte tatsächlich."""
+    from app.worker.tasks import _collect_completeness_questions
+    extractions = [
+        {"type": "jahresabschluss", "year": 2024, "file": "ja2024.pdf",
+         "_unresolved_gaps": [
+             {"group": "X", "period": "vj", "year": 2023, "diff": 100.0},
+         ]},
+    ]
+    qs = _collect_completeness_questions(extractions)
+    assert {q["group"] for q in qs} == {"X"}

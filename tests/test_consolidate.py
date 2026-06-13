@@ -179,6 +179,25 @@ def test_bwa_creates_separate_column_with_group_sums_only():
     assert g["column_sums"][bwa_col_idx] == 500000
 
 
+def test_column_traegt_doc_type_zur_unterscheidung_bwa_susa():
+    """Codex P2: BWA- und Susa-Spalten haben beide kind='bwa'. Damit die
+    relationale Konten-Schicht (source_type) Susa von BWA unterscheiden kann,
+    trägt jede Spalte zusätzlich doc_type (ja|bwa|susa)."""
+    ja = _ja(2024, 2023, [_grp("Umsatzerlöse", "ertrag",
+                               [_acc("8400", "Erlöse", 1000000, 900000)])])
+    bwa = {"type": "bwa", "year": 2025, "period_label": "BWA 2025",
+           "sign_convention": "expenses_negative",
+           "positions": [{"name": "Umsatzerlöse", "type": "ertrag", "betrag": 500000}]}
+    susa = {"type": "susa", "year": 2025, "period_label": "Susa Dez 2025",
+            "sign_convention": "expenses_negative",
+            "positions": [{"name": "Klasse 4", "type": "aufwand", "betrag": 200000}]}
+    r = merge_extractions([ja, bwa, susa])
+    by_label = {c["label"]: c.get("doc_type") for c in r["columns"]}
+    assert by_label["2024"] == "ja"
+    assert by_label["BWA 2025"] == "bwa"
+    assert by_label["Susa Dez 2025"] == "susa"
+
+
 def test_group_order_from_newest_ja():
     old = _ja(2023, 2022, [_grp("B", "neutral", []), _grp("A", "neutral", [])])
     new = _ja(2024, 2023, [_grp("A", "neutral", []), _grp("B", "neutral", []),
