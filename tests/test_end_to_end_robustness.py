@@ -421,3 +421,68 @@ def test_pattern_F_multi_year_baut_ohne_crash():
     _assert_excel_production_ready(xlsx,
         expected_pdf_jue={i: 600000.00 for i, c in enumerate(cons["columns"])
                           if c.get("kind") == "ja" and c.get("year", 0) >= 2022})
+
+
+def test_pattern_G_inkonsistente_stb_nummerierung_renumber():
+    """Pattern G (Prisma 06/2026): zwei JAs mit je eigener STB-Nummerierung —
+    2024 nummeriert Steuern=9 (Zinsaufwand=0, weggelassen), 2022 Zinsaufwand=9 /
+    Steuern=10. Akzeptanz: Excel baut, JÜ centgenau, UND die GuV-Positionen sind
+    durchgehend ohne Dublette nummeriert + Zinsaufwand vor Steuern."""
+    def _grp(name, typ, sec, accs):
+        return {"name": name, "type": typ, "gkv_section": sec,
+                "sub_group_of": None, "accounts": accs}
+    def _a(nr, bez, gj, vj):
+        return {"konto_nr": nr, "bezeichnung": bez, "betrag_gj": gj,
+                "betrag_vj": vj, "confidence": "high"}
+    ja2024 = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_positive", "open_questions": [],
+        "pdf_jahresueberschuss_gj": 793.00, "pdf_jahresueberschuss_vj": 690.00,
+        "groups": [
+            _grp("1. Umsatzerlöse", "ertrag", "umsatzerloese",
+                 [_a("8400", "Erlöse", 1000.00, 900.00)]),
+            _grp("8. sonstige Zinsen und ähnliche Erträge", "ertrag",
+                 "sonstige_zins_ertraege", [_a("2650", "Zinsertrag", 10.00, 5.00)]),
+            _grp("9. Steuern vom Einkommen und vom Ertrag", "steuer", "ee_steuern",
+                 [_a("2200", "KSt", 200.00, 180.00)]),
+            _grp("11. sonstige Steuern", "steuer", "sonst_steuern",
+                 [_a("4510", "Kfz-Steuer", 17.00, 35.00)]),
+        ],
+    }
+    ja2022 = {
+        "type": "jahresabschluss", "year": 2022, "previous_year": 2021,
+        "sign_convention": "expenses_positive", "open_questions": [],
+        "pdf_jahresueberschuss_gj": 786.00, "pdf_jahresueberschuss_vj": 690.00,
+        "groups": [
+            _grp("1. Umsatzerlöse", "ertrag", "umsatzerloese",
+                 [_a("8400", "Erlöse", 800.00, 700.00)]),
+            _grp("9. Zinsen und ähnliche Aufwendungen", "aufwand", "zinsaufwand",
+                 [_a("2120", "Zinsaufwand", 7.00, 6.00)]),
+            _grp("10. Steuern vom Einkommen und vom Ertrag", "steuer", "ee_steuern",
+                 [_a("2200", "KSt", 7.00, 4.00)]),
+        ],
+    }
+    cons = merge_extractions([ja2024, ja2022])
+    xlsx = build_excel(cons)
+    _assert_excel_production_ready(xlsx, expected_pdf_jue={
+        i: cons["pdf_jue_per_column"][i] for i in cons["pdf_jue_per_column"]
+    })
+    names = [g["name"] for g in cons["groups"]]
+    # keine doppelten Positions-Nummern
+    nums = [n.split(".")[0] for n in names if n[:1].isdigit()]
+    assert len(nums) == len(set(nums)), f"Doppelte Nummern: {names}"
+    # Zinsaufwand steht VOR Steuern
+    zins = next(n for n in names if "Zinsen und ähnliche Aufwendungen" in n)
+    steuer = next(n for n in names if "Steuern vom Einkommen" in n)
+    assert names.index(zins) < names.index(steuer)
+
+
+def test_sub_letter_never_crashes_beyond_26():
+    """_sub_letter ist überlaufsicher: a..z, dann aa, ab, … (kein IndexError)."""
+    from app.worker.consolidate import _sub_letter
+    assert _sub_letter(0) == "a"
+    assert _sub_letter(25) == "z"
+    assert _sub_letter(26) == "aa"
+    assert _sub_letter(27) == "ab"
+    # 100 Subs lösen keinen Crash aus
+    assert all(_sub_letter(i) for i in range(100))

@@ -788,6 +788,18 @@ def _strip_leading_sub_label(name: str) -> str:
     return s.strip()
 
 
+def _sub_letter(i: int) -> str:
+    """Sub-Gruppen-Buchstabe a, b, … z, aa, ab, … — überlaufsicher
+    (kein IndexError bei >26 Subs, anders als eine feste Buchstaben-Konstante)."""
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    i += 1  # 1-basiert für bijektive Basis-26 (a..z, aa..)
+    while i > 0:
+        i, rem = divmod(i - 1, 26)
+        out = letters[rem] + out
+    return out
+
+
 def _looks_like_euer(groups: list[dict], endwert_label: str | None) -> bool:
     """EÜR (§4 Abs 3 EStG) erkennen — dort darf NICHT in 1..N umnummeriert
     werden, weil die Hauptsektionen A./B./D. die Struktur tragen."""
@@ -856,7 +868,6 @@ def _renumber_and_reorder_hgb(groups: list[dict],
 
     out: list[dict] = []
     counter = 0
-    letters = "abcdefghijklmnop"
     for _r, _idx, parent, subs in ranked:
         counter += 1
         new_parent = dict(parent)
@@ -865,7 +876,7 @@ def _renumber_and_reorder_hgb(groups: list[dict],
         for li, sub in enumerate(subs):
             new_sub = dict(sub)
             new_sub["name"] = (
-                f"{counter}. {letters[li]}) {_strip_leading_sub_label(sub['name'])}"
+                f"{counter}. {_sub_letter(li)}) {_strip_leading_sub_label(sub['name'])}"
             )
             new_sub["sub_group_of"] = new_parent["name"]
             out.append(new_sub)

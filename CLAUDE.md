@@ -42,7 +42,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 128 Tests müssen grün sein
+.venv/bin/pytest                                  # 130 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -342,6 +342,7 @@ einer pro Pattern):
 - D: BWA-only mit Aggregat-Hierarchie (Vorläufiges Ergebnis als Endwert)
 - E: EÜR §4 Abs 3 mit Hinzurechnungen/Kürzungen
 - F: Multi-Year-Setup (3+ JAs, Cross-Year-Routing)
+- G: Inkonsistente STB-Nummerierung über Jahre → §275-Renummerierung (keine Dubletten, Zinsaufwand vor Steuern)
 
 **Neuer PDF-Stil aufgetaucht?** → neues Pattern als Test-Fixture in
 `test_end_to_end_robustness.py` ergänzen BEVOR der Fix deployed wird.
@@ -460,7 +461,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 128 Tests (Stand 2026-06-13)
+.venv/bin/pytest                      # 130 Tests (Stand 2026-06-13)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 
