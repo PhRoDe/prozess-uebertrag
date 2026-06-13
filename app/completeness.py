@@ -33,23 +33,61 @@ def _match_group_name(raw, names: list) -> Any:
     return matches[0] if len(matches) == 1 else None
 
 
-def _leaf_col_diff(group: dict | None, col_idx: int):
-    """(printed, acc_sum, diff) der EIGENEN (nicht-synthetischen) Konten einer
-    Gruppe in einer Spalte, aus der konsolidierten Struktur. diff = printed −
-    acc_sum = exakt der Restposten, der gesetzt würde. None ohne gedruckte
-    Summe."""
-    if not group:
-        return None
-    printed = _col_get(group.get("column_sums") or {}, col_idx)
-    if not isinstance(printed, (int, float)):
-        return None
-    acc = 0.0
+def _own_acc_detail(group: dict, col_idx: int) -> tuple[float, bool]:
+    """(Summe der eigenen nicht-synthetischen Konten, hat_eigenen_Wert) einer
+    Gruppe in einer Spalte. Robust gegen int/Str-Spalten-Keys (JSONB)."""
+    total = 0.0
+    has_value = False
     for a in group.get("accounts") or []:
         if a.get("confidence") == "synthetic":
             continue
         v = _col_get(a.get("values") or {}, col_idx)
         if isinstance(v, (int, float)):
-            acc += v
+            total += v
+            has_value = True
+    return total, has_value
+
+
+def _own_acc(group: dict, col_idx: int) -> float:
+    return _own_acc_detail(group, col_idx)[0]
+
+
+def _leaf_col_diff(group: dict | None, col_idx: int):
+    """(printed, acc_sum, diff) der eigenen Konten einer (Leaf-)Gruppe in einer
+    Spalte, aus der konsolidierten Struktur. diff = printed − acc_sum = exakt der
+    Restposten, der gesetzt würde. None ohne gedruckte Summe."""
+    if not group:
+        return None
+    printed = _col_get(group.get("column_sums") or {}, col_idx)
+    if not isinstance(printed, (int, float)):
+        return None
+    acc = _own_acc(group, col_idx)
+    return round(float(printed), 2), round(acc, 2), round(float(printed) - acc, 2)
+
+
+def _parent_col_diff(parent: dict | None, groups: list, col_idx: int):
+    """Wie _leaf_col_diff, aber kinder-bewusst: acc_sum = eigene Konten + Konten
+    der direkten Sub-Gruppen (aus denselben KONSOLIDIERTEN, ggf. normalisierten
+    Werten). So ist der Parent-Diff mit den Kind-Diffs vergleichbar — sonst
+    schlägt die Dedup bei sign-normalisierten Spalten fehl (Codex P2)."""
+    if not parent:
+        return None
+    printed = _col_get(parent.get("column_sums") or {}, col_idx)
+    if not isinstance(printed, (int, float)):
+        return None
+    acc = _own_acc(parent, col_idx)
+    for g in groups:
+        if g.get("sub_group_of") != parent.get("name"):
+            continue
+        child_sum, has_acc = _own_acc_detail(g, col_idx)
+        if has_acc:
+            acc += child_sum
+        else:
+            # summary-only Kind (keine Konten): gedruckte Summe zählt mit
+            # (wie verify._group_acc_sum / project_line_items).
+            cv = _col_get(g.get("column_sums") or {}, col_idx)
+            if isinstance(cv, (int, float)):
+                acc += cv
     return round(float(printed), 2), round(acc, 2), round(float(printed) - acc, 2)
 
 
@@ -88,19 +126,54 @@ def completeness_gaps(consolidated: dict | None) -> list[dict]:
         if y is not None:
             year_to_col.setdefault(y, c["idx"])
     by_name = {g.get("name"): g for g in groups}
-    out: list[dict] = []
-    for q in questions:
-        if q.get("type") != "completeness_gap":
-            continue
+    all_names = list(by_name.keys())
+    parent_set = {g.get("sub_group_of") for g in groups if g.get("sub_group_of")}
+    raw = [q for q in questions if q.get("type") == "completeness_gap"]
+
+    # Phase 1: jede Lücke auflösen (Ziel-Leaf/Spalte) + aus der konsolidierten
+    # Spalte rekalkulieren; konsolidiert geschlossene (≤1 ct) wegfiltern.
+    resolved: list[tuple[dict, dict]] = []  # (raw_q, gefilterter gap)
+    for q in raw:
+        matched_full = _match_group_name(q.get("group"), all_names)
         tg = _match_group_name(q.get("group"), leaf)
         tc = year_to_col.get(q.get("year"))
         gap = {**q, "target_group": tg, "target_col": tc}
-        if tg is not None and tc is not None:
-            rec = _leaf_col_diff(by_name.get(tg), tc)
-            if rec is not None:
-                printed, acc, diff = rec
-                if abs(diff) <= 0.01:
-                    continue  # konsolidiert geschlossen → nicht zeigen
-                gap.update(printed_sum=printed, acc_sum=acc, diff=diff)
+        # Leaf-Gap aus eigenen Konten, Parent-Gap kinder-bewusst — beide aus den
+        # KONSOLIDIERTEN Werten, damit Parent/Kind-Diffs vergleichbar sind.
+        rec = None
+        if tc is not None and matched_full is not None:
+            if matched_full in parent_set:
+                rec = _parent_col_diff(by_name.get(matched_full), groups, tc)
+            elif tg is not None:
+                rec = _leaf_col_diff(by_name.get(tg), tc)
+        if rec is not None:
+            printed, acc, diff = rec
+            if abs(diff) <= 0.01:
+                continue  # konsolidiert geschlossen → nicht zeigen
+            gap.update(printed_sum=printed, acc_sum=acc, diff=diff)
+        resolved.append((q, gap))
+
+    # Phase 2: Dedup verschachtelter Lücken (Codex P2). document_completeness
+    # emittiert für dasselbe fehlende Konto Kind- UND Parent-Gap (Parent-acc_sum
+    # zählt Kinder mit). Kind-Aggregat NUR aus den ÜBERLEBENDEN Kindern + deren
+    # REKALKULIERTEN Diffs summieren (nicht aus rohen/stale Kind-Gaps) — sonst
+    # unterdrückte ein bereits geschlossenes Kind fälschlich den Parent.
+    child_gap_diff_sum: dict = {}
+    for q, gap in resolved:
+        node = by_name.get(_match_group_name(q.get("group"), all_names) or "")
+        if node and node.get("sub_group_of"):
+            key = (node.get("sub_group_of"), q.get("year"))
+            child_gap_diff_sum[key] = child_gap_diff_sum.get(key, 0.0) + (gap.get("diff") or 0.0)
+
+    # Phase 3: emittieren; Parent-Gap überspringen NUR wenn er exakt das Aggregat
+    # der überlebenden Kinder DESSELBEN Jahres ist (Standalone- oder Residuum-
+    # Parent-Gaps bleiben sichtbar).
+    out: list[dict] = []
+    for q, gap in resolved:
+        matched_full = _match_group_name(q.get("group"), all_names)
+        if matched_full is not None and matched_full in parent_set:
+            csum = child_gap_diff_sum.get((matched_full, q.get("year")))
+            if csum is not None and abs((gap.get("diff") or 0.0) - csum) <= 0.01:
+                continue
         out.append(gap)
     return out

@@ -29,9 +29,14 @@ alter table pdf_extractions enable row level security;
 -- Optionale Retention: gecachte Finanzdaten nicht ewig halten. pg_cron räumt
 -- Einträge älter als 30 Tage weg (gezieltes DELETE, kein truncate — keepalive
 -- bleibt unberührt). Best-effort: nur wenn pg_cron verfügbar ist.
+-- Idempotent: vorhandenen Job erst entplanen (sonst Fehler bei Re-Run der
+-- Migration in Umgebungen mit pg_cron).
 do $$
 begin
   if exists (select 1 from pg_extension where extname = 'pg_cron') then
+    if exists (select 1 from cron.job where jobname = 'cleanup_pdf_extractions') then
+      perform cron.unschedule('cleanup_pdf_extractions');
+    end if;
     perform cron.schedule(
       'cleanup_pdf_extractions',
       '0 3 * * *',

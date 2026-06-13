@@ -349,3 +349,167 @@ def test_jobs_repo_create_setzt_created_by():
     JobsRepo(client=client).create([], created_by="alice")
     row = client.table.return_value.insert.call_args.args[0]
     assert row["created_by"] == "alice"
+
+
+def test_completeness_gaps_dedupes_parent_wenn_kind_gap():
+    """Codex P2: bei verschachtelten Gruppen (Parent + Kind beide mit Lücke für
+    dasselbe fehlende Konto) darf nicht beide Warnungen zeigen — der Parent-Gap
+    ist das Aggregat des Kind-Gaps. Kind bleibt (actionable), Parent dedupliziert."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Materialaufwand", "column_sums": {0: 1000.0}, "accounts": []},
+            {"name": "4a) RHB", "sub_group_of": "4. Materialaufwand",
+             "column_sums": {0: 1000.0},
+             "accounts": [{"konto_nr": "5100", "values": {0: 900.0}}]},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4. Materialaufwand", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 900.0, "diff": 100.0},
+            {"type": "completeness_gap", "group": "4a) RHB", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 900.0, "diff": 100.0},
+        ],
+    }
+    names = [g["group"] for g in completeness_gaps(cons)]
+    assert "4. Materialaufwand" not in names   # Parent dedupliziert
+    assert "4a) RHB" in names                   # Kind bleibt
+
+
+def test_completeness_gaps_behaelt_standalone_parent_gap():
+    """Ein Parent-Gap OHNE Kind-Gap (Kinder vollständig, Parent eigene Lücke)
+    bleibt sichtbar — nicht fälschlich dedupliziert."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Materialaufwand", "column_sums": {0: 1000.0}, "accounts": []},
+            {"name": "4a) RHB", "sub_group_of": "4. Materialaufwand",
+             "column_sums": {0: 500.0},
+             "accounts": [{"konto_nr": "5100", "values": {0: 500.0}}]},  # Kind vollständig
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4. Materialaufwand", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 500.0, "diff": 500.0},
+        ],
+    }
+    names = [g["group"] for g in completeness_gaps(cons)]
+    assert "4. Materialaufwand" in names
+
+
+def test_completeness_gaps_dedup_nur_im_gleichen_jahr():
+    """Codex P2: Parent-Dedup nur fürs SELBE Jahr — ein Kind-Gap 2023 darf einen
+    eigenständigen Parent-Gap 2024 nicht verdecken."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2023", "kind": "ja", "doc_type": "ja", "year": 2023},
+                    {"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Material", "column_sums": {}, "accounts": []},
+            {"name": "4a) RHB", "sub_group_of": "4. Material", "column_sums": {}, "accounts": []},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4a) RHB", "year": 2023,
+             "printed_sum": 500.0, "acc_sum": 400.0, "diff": 100.0},
+            {"type": "completeness_gap", "group": "4. Material", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 700.0, "diff": 300.0},
+        ],
+    }
+    keyed = {(g["group"], g["year"]) for g in completeness_gaps(cons)}
+    assert ("4a) RHB", 2023) in keyed
+    assert ("4. Material", 2024) in keyed   # nicht durch Kind-2023 verdeckt
+
+
+def test_completeness_gaps_behaelt_parent_mit_residuum():
+    """Codex P2: Parent-Gap nur dedupen, wenn er EXAKT das Kind-Aggregat ist.
+    Ist der Parent-Diff größer (zusätzlicher Parent-Shortfall), bleibt er sichtbar."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Material", "column_sums": {}, "accounts": []},
+            {"name": "4a) RHB", "sub_group_of": "4. Material", "column_sums": {}, "accounts": []},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4a) RHB", "year": 2024,
+             "printed_sum": 500.0, "acc_sum": 400.0, "diff": 100.0},
+            {"type": "completeness_gap", "group": "4. Material", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 700.0, "diff": 300.0},  # 200 mehr als Kind
+        ],
+    }
+    keyed = {(g["group"], g["year"]) for g in completeness_gaps(cons)}
+    assert ("4a) RHB", 2024) in keyed
+    assert ("4. Material", 2024) in keyed   # Residuum 200 → bleibt
+
+
+def test_completeness_gaps_dedupes_parent_wenn_diff_exakt_kind():
+    """Gegenprobe: Parent-Diff == Σ Kind-Diff → dedupen."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Material", "column_sums": {}, "accounts": []},
+            {"name": "4a) RHB", "sub_group_of": "4. Material", "column_sums": {}, "accounts": []},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4a) RHB", "year": 2024,
+             "printed_sum": 500.0, "acc_sum": 400.0, "diff": 100.0},
+            {"type": "completeness_gap", "group": "4. Material", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 900.0, "diff": 100.0},  # == Kind
+        ],
+    }
+    keyed = {(g["group"], g["year"]) for g in completeness_gaps(cons)}
+    assert ("4. Material", 2024) not in keyed   # exaktes Aggregat → dedup
+    assert ("4a) RHB", 2024) in keyed
+
+
+def test_completeness_gaps_dedup_robust_bei_negativen_werten():
+    """Codex P2: Parent-Diff kinder-bewusst aus konsolidierten Werten — Dedup
+    greift auch bei (sign-normalisierten) negativen Aufwands-Werten."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Aufwand", "column_sums": {0: -1000.0}, "accounts": []},
+            {"name": "4a) RHB", "sub_group_of": "4. Aufwand", "column_sums": {0: -1000.0},
+             "accounts": [{"konto_nr": "5100", "values": {0: -900.0}}]},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4a) RHB", "year": 2024,
+             "printed_sum": -1000.0, "acc_sum": -900.0, "diff": -100.0},
+            {"type": "completeness_gap", "group": "4. Aufwand", "year": 2024,
+             "printed_sum": -1000.0, "acc_sum": -900.0, "diff": -100.0},
+        ],
+    }
+    names = [g["group"] for g in completeness_gaps(cons)]
+    assert "4. Aufwand" not in names   # Parent dedupliziert (−1000 −(−900) = −100 == Kind)
+    assert "4a) RHB" in names
+
+
+def test_completeness_gaps_parent_zaehlt_summary_only_kinder():
+    """Codex P2: ein summary-only Kind (nur column_sums, keine Konten) zählt für
+    die Parent-Vollständigkeit mit (wie verify._group_acc_sum/project_line_items).
+    Sonst rechnet der Parent-Diff zu groß → bogus Residuum, Dedup greift nicht."""
+    from app.completeness import completeness_gaps
+    cons = {
+        "columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+        "groups": [
+            {"name": "4. Mat", "column_sums": {0: 1000.0}, "accounts": []},
+            # summary-only Kind: 200 gedruckt, keine Konten
+            {"name": "4a) Summe", "sub_group_of": "4. Mat", "column_sums": {0: 200.0},
+             "accounts": []},
+            # Detail-Kind: 800 gedruckt, 750 erfasst (fehlend 50)
+            {"name": "4b) Detail", "sub_group_of": "4. Mat", "column_sums": {0: 800.0},
+             "accounts": [{"konto_nr": "5100", "values": {0: 750.0}}]},
+        ],
+        "questions": [
+            {"type": "completeness_gap", "group": "4b) Detail", "year": 2024,
+             "printed_sum": 800.0, "acc_sum": 750.0, "diff": 50.0},
+            {"type": "completeness_gap", "group": "4. Mat", "year": 2024,
+             "printed_sum": 1000.0, "acc_sum": 950.0, "diff": 50.0},
+        ],
+    }
+    names = [g["group"] for g in completeness_gaps(cons)]
+    # Parent-Diff = 1000 - (200 summary + 750 detail) = 50 == Kind-Aggregat → dedup
+    assert "4. Mat" not in names
+    assert "4b) Detail" in names
