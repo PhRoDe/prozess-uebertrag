@@ -6,7 +6,7 @@ from anthropic import Anthropic, APIStatusError
 from app.config import get_settings
 from app.worker.prompts import (
     DOC_TYPE_PROMPT, EXTRACTION_PROMPT_TEXT, EXTRACTION_PROMPT_VISION,
-    BWA_PROMPT, SUSA_PROMPT, SYSTEM_PROMPT,
+    BWA_PROMPT, SUSA_PROMPT, SYSTEM_PROMPT, REEXTRACT_PROMPT,
 )
 
 
@@ -65,6 +65,44 @@ class ClaudeClient:
             system=SYSTEM_PROMPT,
         )
         return self._parse_json(raw)
+
+    def reextract_groups(self, text: str, gaps: list[dict]) -> dict[str, list[dict]]:
+        """Gezielte Re-Extraktion (Selbstheilung): fragt Claude nur nach den
+        Einzelkonten der Lücken-Positionen. Liefert {gruppen_name: [konten]}.
+        Leere gaps → kein API-Call."""
+        if not gaps:
+            return {}
+        # Lücken-Positionen als DATEN-Block (<gaps>), NICHT im Instruktions-Text —
+        # ein PDF-abgeleiteter Positions-Name könnte sonst die Anweisung steuern
+        # (Prompt-Injection, Codex-Finding P2-4).
+        def _san(s: object) -> str:
+            # Winkelklammern entfernen, damit ein PDF-abgeleiteter Name nicht aus
+            # dem <gaps>-Datenblock ausbrechen kann (Codex-Finding P2-5).
+            return str(s).replace("<", " ").replace(">", " ")
+        # Eine Zeile PRO Lücke mit Periode (Geschäftsjahr/Vorjahr) + Jahr — sonst
+        # weiß Claude bei einer reinen VJ-Lücke nicht, welche Spalte gemeint ist,
+        # und extrahiert ggf. gegen das falsche Jahr (Codex Round-8B).
+        period_label = {"gj": "Geschäftsjahr", "vj": "Vorjahr"}
+        gaps_block = "\n".join(
+            f"- '{_san(g.get('group'))}' "
+            f"({period_label.get(g.get('period'), g.get('period'))} {g.get('year')}): "
+            f"gedruckte Summe {g.get('printed_sum')}, erfasste Konten "
+            f"{g.get('acc_sum')} (Differenz {g.get('diff')})"
+            for g in gaps
+        )
+        raw = self._call(
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": REEXTRACT_PROMPT},
+                    {"type": "text", "text": f"\n\n<gaps>\n{gaps_block}\n</gaps>"},
+                    {"type": "text", "text": f"\n\n<pdf_content>\n{text}\n</pdf_content>"},
+                ]}
+            ],
+            system=SYSTEM_PROMPT,
+        )
+        result = self._parse_json(raw)
+        return {grp["name"]: grp.get("accounts", [])
+                for grp in result.get("groups", []) if grp.get("name")}
 
     def extract_scan_pdf(self, pages_png: list[bytes], is_bwa: bool = False,
                           doc_type: str | None = None) -> dict[str, Any]:

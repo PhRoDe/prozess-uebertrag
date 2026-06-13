@@ -15,6 +15,7 @@ from app.models import JobStatus
 from app.storage import StorageClient
 from app.worker.claude_client import ClaudeClient, ExtractionError
 from app.worker.consolidate import merge_extractions
+from app.worker.verify import heal_extraction
 from app.worker.pdf_detect import (
     PdfKind, classify_pdf, extract_guv_section, extract_susa_section,
     extract_text, pdf_to_images, _has_susa_section,
@@ -61,8 +62,26 @@ def _extract_pdf(claude: ClaudeClient, data: bytes) -> list[dict]:
         return [claude.extract_text_pdf(
             extract_susa_section(data), doc_type="susa")]
     # JAs koennen 60+ Seiten haben → nur GuV-Kontennachweis an Claude.
-    return [claude.extract_text_pdf(
-        extract_guv_section(data), doc_type="jahresabschluss")]
+    guv_text = extract_guv_section(data)
+    extraction = claude.extract_text_pdf(guv_text, doc_type="jahresabschluss")
+    # Selbstheilung: fehlen Konten (Konten-Summe < gedruckte Gruppensumme),
+    # gezielt nachextrahieren (max. 2 Runden). Verbleibende Lücken zur Anzeige
+    # im Review (Phase 3) am Dokument vermerken.
+    # Wichtig: die Re-Extraktion ist eine OPTIONALE Verbesserung. Schlägt sie
+    # fehl (API-Fehler, kaputtes JSON), darf das NICHT den Job killen — wir
+    # fallen auf die bereits erfolgreiche Erst-Extraktion zurück (graceful
+    # degradation), die Lücken werden dann nur angezeigt statt geheilt.
+    def _safe_reextract(_ext, gaps):
+        try:
+            return claude.reextract_groups(guv_text, gaps)
+        except Exception:
+            log.warning("self-heal reextract failed, keeping original extraction",
+                        exc_info=True)
+            return {}
+    healed, unresolved = heal_extraction(extraction, _safe_reextract)
+    if unresolved:
+        healed["_unresolved_gaps"] = unresolved
+    return [healed]
 
 
 def extract_job(job_id: str) -> None:
@@ -99,6 +118,21 @@ def extract_job(job_id: str) -> None:
                 extractions.append(extraction)
 
         consolidated = merge_extractions(extractions)
+        # Verbleibende Vollständigkeits-Lücken (nach der Selbstheilung) sichtbar
+        # machen: als completeness_gap ins Fragen-Sheet (consolidated.questions).
+        # Sonst füllt der Excel-Builder still einen Restposten und der User sieht
+        # die fehlenden Konten nie (Codex-Finding P2-6).
+        for doc in extractions:
+            for gap in doc.get("_unresolved_gaps", []):
+                consolidated.setdefault("questions", []).append({
+                    "type": "completeness_gap",
+                    "group": gap.get("group"),
+                    "year": gap.get("year"),
+                    "printed_sum": gap.get("printed_sum"),
+                    "acc_sum": gap.get("acc_sum"),
+                    "diff": gap.get("diff"),
+                    "document": doc.get("file"),
+                })
         # open_questions für Review-Screen: nur aus der jüngsten JA (die ist am relevantesten).
         # Claude liefert open_questions manchmal als String statt Dict (z.B. "Diese PDF ist
         # eine EÜR ohne erkennbare GuV-Gruppen"). String-Hinweise als hint-only-Eintraege

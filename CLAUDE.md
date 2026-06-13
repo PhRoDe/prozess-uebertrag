@@ -45,7 +45,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 134 Tests müssen grün sein
+.venv/bin/pytest                                  # 159 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -469,11 +469,22 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
   Ergebnis: zwei Spalten je Periode (BWA-Aggregat + Susa-Detail). Die Susa-
   Spalte hat bewusst KEINE Jahresüberschuss-Zelle (Susa hat keinen Endwert) —
   das Periodenergebnis steht in der parallelen BWA-Spalte (Vorläufiges Ergebnis).
+- **Verify-and-Heal der JA-Extraktion** (Prisma 2026-06, `app/worker/verify.py`):
+  pro JA-Dokument prüft `document_completeness` je Gruppe Konten-Summe (inkl.
+  Sub-Gruppen) vs gedruckte `pdf_sum_gj/_vj`. Bei Lücken heilt `heal_extraction`
+  gezielt nach (`claude_client.reextract_groups`, max 2 Runden). **Wichtige
+  Invarianten** (durch gstack-codex gehärtet): Heal-Fehler killen den Job NICHT
+  (Fallback auf Erst-Extraktion); ein Kandidat wird nur übernommen, wenn er die
+  geankerte Lücke VOLL schließt und unanchored Perioden-Summen (z.B. VJ ohne
+  `pdf_sum_vj`) NICHT verändert; kaputte `accounts` werden verworfen
+  (`_valid_accounts`); Gap-Namen stehen als Daten im `<gaps>`-Block (Injection).
+  Nicht heilbare Lücken erscheinen als `completeness_gap` im Fragen-Sheet (kein
+  Hard-Gate — der Builder ergänzt den Restposten).
 
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 134 Tests (Stand 2026-06-13)
+.venv/bin/pytest                      # 159 Tests (Stand 2026-06-13)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 

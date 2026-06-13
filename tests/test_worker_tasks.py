@@ -190,3 +190,123 @@ def test_resume_stuck_jobs_retries_extracting():
         tasks_mod.resume_stuck_jobs()
         repo.release_claim.assert_called_once_with("job-1")
         extract_mock.assert_called_once_with("job-1")
+
+
+def test_extract_ja_self_heals_missing_accounts():
+    """Phase 1b: hat ein JA eine Lücke (Konten-Summe < gedruckte Gruppensumme),
+    wird gezielt nachextrahiert und die fehlenden Konten gemergt."""
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="JA text " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV text"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "jahresabschluss"
+        # Erst-Extraktion: Lücke (gedruckt 200, nur 150 erfasst)
+        claude.extract_text_pdf.return_value = {
+            "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+            "groups": [
+                {"name": "7. sonstige", "gkv_section": "sonst_betr_aufw",
+                 "pdf_sum_gj": 200.0,
+                 "accounts": [{"konto_nr": "4900", "bezeichnung": "A",
+                               "betrag_gj": 150.0}]},
+            ],
+            "open_questions": [],
+        }
+        # Selbstheilung liefert die VOLLE Kontenliste zurück
+        claude.reextract_groups.return_value = {
+            "7. sonstige": [
+                {"konto_nr": "4900", "bezeichnung": "A", "betrag_gj": 150.0},
+                {"konto_nr": "4901", "bezeichnung": "B", "betrag_gj": 50.0},
+            ]
+        }
+        extract_job("job-1")
+        claude.reextract_groups.assert_called_once()
+        payload = repo.set_extraction.call_args.args[1]
+        grp = payload["documents"][0]["groups"][0]
+        assert len(grp["accounts"]) == 2
+        assert sum(a["betrag_gj"] for a in grp["accounts"]) == 200.0
+
+
+def test_extract_ja_survives_self_heal_error():
+    """Review-Finding (1b): schlägt die Selbstheilung fehl (API-Fehler / kaputtes
+    JSON bei der Re-Extraktion), darf das NICHT den ganzen Job killen — die
+    erste, erfolgreiche Extraktion muss erhalten bleiben (graceful degradation)."""
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="JA text " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV text"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "jahresabschluss"
+        claude.extract_text_pdf.return_value = {
+            "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+            "groups": [
+                {"name": "7. sonstige", "gkv_section": "sonst_betr_aufw",
+                 "pdf_sum_gj": 200.0,
+                 "accounts": [{"konto_nr": "4900", "bezeichnung": "A", "betrag_gj": 150.0}]},
+            ],
+            "open_questions": [],
+        }
+        # Selbstheilung wirft (z.B. 429 nach Retries / kaputtes JSON)
+        claude.reextract_groups.side_effect = RuntimeError("API down")
+
+        extract_job("job-1")
+
+        # Job darf NICHT failen — Original-Extraktion bleibt erhalten
+        repo.set_extraction.assert_called_once()
+        failed = [c for c in repo.set_status.call_args_list
+                  if len(c.args) >= 2 and c.args[1] == JobStatus.FAILED]
+        assert not failed, f"Job sollte nicht failen: {failed}"
+        # Die Original-Gruppe ist noch da
+        payload = repo.set_extraction.call_args.args[1]
+        assert payload["documents"][0]["groups"][0]["name"] == "7. sonstige"
+
+
+def test_unresolved_gaps_surface_in_consolidated_questions():
+    """Codex P2-6: bleibt nach der Selbstheilung eine Lücke offen, muss sie im
+    Fragen-Sheet sichtbar sein (consolidated.questions), nicht still verschwinden."""
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="JA " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV text"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "jahresabschluss"
+        claude.extract_text_pdf.return_value = {
+            "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+            "groups": [{"name": "7. sonstige", "gkv_section": "sonst_betr_aufw",
+                        "pdf_sum_gj": 200.0,
+                        "accounts": [{"konto_nr": "4900", "bezeichnung": "A", "betrag_gj": 150.0}]}],
+            "open_questions": [],
+        }
+        claude.reextract_groups.return_value = {}  # Heal kann nicht schließen
+        extract_job("job-1")
+        payload = repo.set_extraction.call_args.args[1]
+        qs = payload["consolidated"].get("questions", [])
+        assert any(q.get("type") == "completeness_gap" for q in qs), \
+            f"offene Lücke fehlt im Fragen-Sheet: {qs}"

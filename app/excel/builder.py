@@ -802,6 +802,11 @@ def _format_question(q: dict) -> str:
         return (f"Konto {q.get('konto_nr') or '(ohne Nr)'} · "
                 f"'{q.get('bezeichnung')}' · Jahr {q.get('year')} · "
                 f"Betrag {q.get('betrag_gj')} — {q.get('hint', '')}")
+    if t == "completeness_gap":
+        return (f"Position '{q.get('group')}' · Jahr {q.get('year')}: gedruckte "
+                f"Summe {q.get('printed_sum')} ≠ Summe der erfassten Konten "
+                f"{q.get('acc_sum')} (Differenz {q.get('diff')}) — evtl. fehlen "
+                f"Konten; im Excel als Restposten ergänzt.")
     if t == "jue_excel_vs_pdf_mismatch":
         return (f"Spalte {q.get('column_label')}: "
                 f"PDF-JÜ {q.get('pdf_says')} ≠ Excel-JÜ {q.get('excel_says')}")
