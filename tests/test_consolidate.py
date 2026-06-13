@@ -268,7 +268,8 @@ def test_cross_year_group_match_via_normalized_name():
     ])
     r = merge_extractions([doc22, doc24])
     by_name = {g["name"]: g for g in r["groups"]}
-    target = by_name.get("4. Materialaufwand")
+    # HGB-Renummerierung (Issue 2): einzige GKV-Position → "1. Materialaufwand"
+    target = by_name.get("1. Materialaufwand")
     assert target is not None
     konto5100 = next(a for a in target["accounts"] if a["konto_nr"] == "5100")
     by_year = {r["columns"][i]["year"]: konto5100["values"].get(i)
@@ -316,7 +317,9 @@ def test_gkv_section_propagated_to_consolidated_groups():
     ])
     r = merge_extractions([doc])
     by_name = {g["name"]: g for g in r["groups"]}
-    assert by_name["Umsatzerlöse"]["gkv_section"] == "umsatzerloese"
+    # HGB-Renummerierung: "Umsatzerlöse" → "1. Umsatzerlöse"; das neutrale
+    # "Was-Auch-Immer" (keine gkv_section) bleibt unverändert.
+    assert by_name["1. Umsatzerlöse"]["gkv_section"] == "umsatzerloese"
     assert by_name["Was-Auch-Immer"]["gkv_section"] == "neutral"
 
 
@@ -673,15 +676,16 @@ def test_flat_old_ja_routes_into_sub_when_template_is_nested():
     ])
     r = merge_extractions([doc_2020, doc_2022])
 
-    # Konten landen in der realen Sub-Group, NICHT im synthetic Parent
-    parent = next((g for g in r["groups"] if g["name"] == "4. Materialaufwand"), None)
+    # Konten landen in der realen Sub-Group, NICHT im synthetic Parent.
+    # HGB-Renummerierung: "4. Materialaufwand" → "2." (nach "1. Umsatzerlöse").
+    parent = next((g for g in r["groups"] if g["name"] == "2. Materialaufwand"), None)
     sub = next((g for g in r["groups"]
-                 if g["name"] == "4. a) Aufwendungen für RHB"), None)
+                 if g["name"] == "2. a) Aufwendungen für RHB"), None)
     assert parent is not None and sub is not None
 
     # Der synthetic Parent darf KEINE eigenen Konten haben
     assert len(parent.get("accounts", [])) == 0, \
-        f"Parent '4. Materialaufwand' sollte synthetisch leer sein, hat aber " \
+        f"Parent '2. Materialaufwand' sollte synthetisch leer sein, hat aber " \
         f"{len(parent['accounts'])} Konten"
 
     # Sub hat alle Wareneingang-Werte aus beiden JAs (2020, 2021 als VJ aus 2022, 2022)
@@ -731,7 +735,7 @@ def test_outlier_column_with_inverted_signs_is_normalized():
     # Spalte 2022 finden
     cols = r["columns"]
     col_2022 = next(i for i, c in enumerate(cols) if c["year"] == 2022)
-    materialaufwand = next(g for g in r["groups"] if g["name"] == "Materialaufwand")
+    materialaufwand = next(g for g in r["groups"] if g["name"] == "2. Materialaufwand")
     waren = next(a for a in materialaufwand["accounts"] if a["konto_nr"] == "5400")
     skonti = next(a for a in materialaufwand["accounts"] if a["konto_nr"] == "5736")
     # Nach Normalisierung: 2022er Werte invertiert auf Mehrheits-Konvention
@@ -760,7 +764,7 @@ def test_no_normalization_when_majority_unclear():
     cols = r["columns"]
     col_2024 = next(i for i, c in enumerate(cols) if c["year"] == 2024)
     col_2025 = next(i for i, c in enumerate(cols) if c["year"] == 2025)
-    materialaufwand = next(g for g in r["groups"] if g["name"] == "Materialaufwand")
+    materialaufwand = next(g for g in r["groups"] if g["name"] == "1. Materialaufwand")
     waren = next(a for a in materialaufwand["accounts"] if a["konto_nr"] == "5400")
     # Werte unverändert (keine Mehrheit)
     assert waren["values"][col_2024] == 1_000_000
@@ -782,3 +786,134 @@ def test_susa_default_label_when_period_label_missing():
     }
     r = merge_extractions([susa])
     assert r["columns"][0]["label"] == "Susa 2025"
+
+
+# --- Issue 2: HGB-Positions-Renummerierung bei Multi-Jahr-Merge -------------
+
+def test_hgb_multiyear_renumber_no_duplicate_positions():
+    """Prisma-Bug 06/2026: 2024 nummeriert Steuern=9 (Zinsaufwand=0, fehlt),
+    2022 nummeriert Zinsaufwand=9/Steuern=10. Naiver Merge → zwei "9." + Zins-
+    aufwand am Ende. Erwartet: GKV-Reihenfolge, durchgehend neu nummeriert,
+    Zinsaufwand VOR Steuern, keine Dubletten."""
+    ja2024 = _ja(2024, 2023, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 1000, 900)],
+             gkv_section="umsatzerloese"),
+        _grp("8. sonstige Zinsen und ähnliche Erträge", "ertrag",
+             [_acc("2650", "Zinsertrag", 10, 5)], gkv_section="sonstige_zins_ertraege"),
+        _grp("9. Steuern vom Einkommen und vom Ertrag", "steuer",
+             [_acc("2200", "KSt", 200, 180)], gkv_section="ee_steuern"),
+        _grp("11. sonstige Steuern", "steuer",
+             [_acc("4510", "Kfz-Steuer", 5, 4)], gkv_section="sonst_steuern"),
+    ])
+    ja2022 = _ja(2022, 2021, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 800, 700)],
+             gkv_section="umsatzerloese"),
+        _grp("8. sonstige Zinsen und ähnliche Erträge", "ertrag",
+             [_acc("2650", "Zinsertrag", 3, 2)], gkv_section="sonstige_zins_ertraege"),
+        _grp("9. Zinsen und ähnliche Aufwendungen", "aufwand",
+             [_acc("2120", "Zinsaufwand", 7, 6)], gkv_section="zinsaufwand"),
+        _grp("10. Steuern vom Einkommen und vom Ertrag", "steuer",
+             [_acc("2200", "KSt", 70, 60)], gkv_section="ee_steuern"),
+    ])
+    r = merge_extractions([ja2024, ja2022])
+    names = [g["name"] for g in r["groups"]]
+    assert names == [
+        "1. Umsatzerlöse",
+        "2. sonstige Zinsen und ähnliche Erträge",
+        "3. Zinsen und ähnliche Aufwendungen",
+        "4. Steuern vom Einkommen und vom Ertrag",
+        "5. sonstige Steuern",
+    ], names
+    # keine doppelten Nummern
+    nums = [n.split(".")[0] for n in names]
+    assert len(nums) == len(set(nums))
+
+
+def test_hgb_renumber_keeps_subgroup_lettering_and_pointers():
+    """Sub-Gruppen (a/b) behalten Buchstaben, sub_group_of zeigt auf den
+    neuen Parent-Namen."""
+    ja = _ja(2024, 2023, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 1000, 900)],
+             gkv_section="umsatzerloese"),
+        _grp("4. Materialaufwand", "aufwand", [], gkv_section="materialaufwand_rhb"),
+        _grp("4. a) Aufwendungen für RHB", "aufwand",
+             [_acc("5100", "Wareneinkauf", 300, 280)],
+             sub_of="4. Materialaufwand", gkv_section="materialaufwand_rhb"),
+        _grp("4. b) Aufwendungen für bezogene Leistungen", "aufwand",
+             [_acc("5900", "Fremdleistungen", 100, 90)],
+             sub_of="4. Materialaufwand", gkv_section="materialaufwand_bez_leistungen"),
+    ])
+    r = merge_extractions([ja])
+    by_name = {g["name"]: g for g in r["groups"]}
+    assert "2. Materialaufwand" in by_name
+    subs = [g for g in r["groups"] if g.get("sub_group_of") == "2. Materialaufwand"]
+    assert [s["name"] for s in subs] == [
+        "2. a) Aufwendungen für RHB",
+        "2. b) Aufwendungen für bezogene Leistungen",
+    ]
+
+
+def test_euer_structure_is_not_renumbered():
+    """EÜR (A./B./D.-Struktur, Endwert 'Steuerlicher Gewinn') darf NICHT in
+    1..N umnummeriert werden — die Hauptsektionen-Buchstaben bleiben."""
+    euer = {
+        "type": "jahresabschluss", "year": 2024, "previous_year": 2023,
+        "sign_convention": "expenses_positive",
+        "endwert_label": "Steuerlicher Gewinn nach §4 Abs. 3 EStG",
+        "pdf_jahresueberschuss_gj": 100.0, "pdf_jahresueberschuss_vj": 90.0,
+        "groups": [
+            {"name": "A. 1. Einnahmen", "type": "ertrag", "gkv_section": "umsatzerloese",
+             "sub_group_of": "A. BETRIEBSEINNAHMEN",
+             "accounts": [{"konto_nr": "8400", "bezeichnung": "Erlöse",
+                            "betrag_gj": 100.0, "betrag_vj": 90.0, "confidence": "high"}]},
+        ],
+        "open_questions": [],
+    }
+    r = merge_extractions([euer])
+    names = [g["name"] for g in r["groups"]]
+    assert any(n.startswith("A.") for n in names), names
+    assert not any(n.startswith("1. ") for n in names), names
+
+
+def test_hgb_renumber_keeps_steuern_before_bwa_block():
+    """Ordering-Regression (Prisma 06/2026): spät angehängte GuV-Position
+    (Zinsaufwand aus älterem JA) darf nachfolgende BWA-Aggregat-Gruppen NICHT
+    vor die Steuern ziehen. Erwartet: alle GuV-§275-Positionen (inkl. Steuern)
+    zuerst in GKV-Reihenfolge, BWA-Gruppen danach."""
+    ja2024 = _ja(2024, 2023, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 1000, 900)],
+             gkv_section="umsatzerloese"),
+        _grp("9. Steuern vom Einkommen und vom Ertrag", "steuer",
+             [_acc("2200", "KSt", 200, 180)], gkv_section="ee_steuern"),
+        _grp("11. sonstige Steuern", "steuer",
+             [_acc("4510", "Kfz-Steuer", 5, 4)], gkv_section="sonst_steuern"),
+    ])
+    ja2022 = _ja(2022, 2021, [
+        _grp("1. Umsatzerlöse", "ertrag", [_acc("8400", "Erlöse", 800, 700)],
+             gkv_section="umsatzerloese"),
+        _grp("9. Zinsen und ähnliche Aufwendungen", "aufwand",
+             [_acc("2120", "Zinsaufwand", 7, 6)], gkv_section="zinsaufwand"),
+    ])
+    bwa = {
+        "type": "bwa", "year": 2025, "period_label": "BWA 2025",
+        "sign_convention": "expenses_positive",
+        "groups": [
+            {"name": "Gesamtleistung", "type": "ertrag", "gkv_section": "neutral",
+             "sub_group_of": None, "pdf_sum_gj": 50000.0, "accounts": []},
+        ],
+        "open_questions": [],
+    }
+    r = merge_extractions([ja2024, ja2022, bwa])
+    names = [g["name"] for g in r["groups"]]
+    # GuV-Positionen sequentiell, Zinsaufwand vor Steuern
+    assert names[:4] == [
+        "1. Umsatzerlöse",
+        "2. Zinsen und ähnliche Aufwendungen",
+        "3. Steuern vom Einkommen und vom Ertrag",
+        "4. sonstige Steuern",
+    ], names
+    # BWA-Gruppe NACH allen GuV-Positionen
+    assert names.index("Gesamtleistung") > names.index("4. sonstige Steuern")
+    # keine doppelten Nummern
+    nums = [n.split(".")[0] for n in names if n[:1].isdigit()]
+    assert len(nums) == len(set(nums))

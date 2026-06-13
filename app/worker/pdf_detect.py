@@ -1,5 +1,75 @@
+import re
 from enum import Enum
 import fitz
+
+# Marker für GuV-/Kontennachweis-Erkennung (modul-weit, damit _select_guv_pages
+# als reine, testbare Funktion ohne PDF arbeiten kann).
+_KONTENNACHWEIS_MARKER = re.compile(
+    r"Kontennachweis\s+zur?\s+(Gewinn|G\.?u\.?V)", re.IGNORECASE)
+_OVERVIEW_MARKER = re.compile(
+    r"Gewinn-?\s*und\s*Verlustrechnung|"
+    r"Gewinnermittlung\s+nach\s+§\s*4\s+Abs|"
+    r"\bBETRIEBSEINNAHMEN\b|\bBETRIEBSAUSGABEN\b",
+    re.IGNORECASE)
+_EXCLUDE_MARKER = re.compile(
+    r"\bAKTIVA\b|\bPASSIVA\b|"  # Bilanz
+    r"Anlagen?spiegel|Entwicklung\s+des\s+Anlageverm|"  # Anlagenspiegel
+    r"Allgemeine\s+Auftragsbedingungen",  # AGBs
+    re.IGNORECASE)
+# Deutsches Geldbetrag-Muster (z.B. "1.387.335,10" oder "763,69").
+_AMOUNT_RE = re.compile(r"\d{1,3}(?:\.\d{3})*,\d{2}")
+# Eine Seite startet nur dann einen GuV-Run, wenn sie ein echter Tabellen-
+# Auszug ist (Marker + genug Beträge) — nicht eine reine Prosa-Erwähnung.
+_MIN_AMOUNTS_TO_START = 4
+
+
+def _select_guv_pages(pages_text: list[str]) -> list[int]:
+    """Wähle die GuV-/Kontennachweis-relevanten Seiten-Indizes aus.
+
+    Kernproblem (Bug 06/2026): Ein mehrseitiger Kontennachweis trägt seinen
+    Header ("Gewinn- und Verlustrechnung" / "Kontennachweis zur GuV") nur auf
+    der ERSTEN Seite. Die Folgeseiten (Positionen 5b/6/7/8/9… mit Unterkonten)
+    haben keinen Marker. Die alte Logik nahm nur Marker-Seiten + 1 Pufferseite
+    → Folgeseiten gingen verloren → Positionen ohne Unterkonten.
+
+    Lösung: Ab einer echten GuV-Tabellenseite (Marker + Betrag-Dichte) vorwärts
+    durch alle nicht-ausgeschlossenen Folgeseiten mit Beträgen ("Run") bis zur
+    nächsten Exclude-Seite (Bilanz/Anlagenspiegel) oder EOF. Reine Prosa-
+    Erwähnungen (0 Beträge) starten keinen Run.
+
+    Returns: sortierte Liste der Seiten-Indizes. Leer = kein Treffer (Aufrufer
+    soll dann den vollen Text verwenden).
+    """
+    def excluded(t: str) -> bool:
+        return bool(_EXCLUDE_MARKER.search(t))
+
+    def has_marker(t: str) -> bool:
+        return bool(_OVERVIEW_MARKER.search(t) or _KONTENNACHWEIS_MARKER.search(t))
+
+    def amount_count(t: str) -> int:
+        return len(_AMOUNT_RE.findall(t))
+
+    n = len(pages_text)
+    selected: set[int] = set()
+    i = 0
+    while i < n:
+        t = pages_text[i]
+        starts_run = (
+            not excluded(t) and has_marker(t)
+            and amount_count(t) >= _MIN_AMOUNTS_TO_START
+        )
+        if not starts_run:
+            i += 1
+            continue
+        # Run: diese Seite + alle Folge-(Fortsetzungs-)Seiten mit Beträgen,
+        # bis eine Exclude-Seite kommt oder die Beträge ausgehen (Signatur-/
+        # Prosa-Seite nach dem Kontennachweis).
+        j = i
+        while j < n and not excluded(pages_text[j]) and amount_count(pages_text[j]) >= 1:
+            selected.add(j)
+            j += 1
+        i = max(j, i + 1)
+    return sorted(selected)
 
 
 class PdfKind(str, Enum):
@@ -78,52 +148,20 @@ def extract_guv_section(data: bytes) -> str:
     bei manchen Layouts den Header erst nach dem Tabellen-Body extrahiert.
     Bilanz-, Anlagenspiegel- und AGB-Seiten werden ausgeschlossen.
 
+    Mehrseitige Kontennachweise: Der Header steht nur auf der ersten Seite —
+    Folgeseiten werden über `_select_guv_pages` (Run-Vorwärts-Logik) mitgenommen,
+    damit Positionen 6-12 ihre Unterkonten behalten (Bug 06/2026).
+
     Fallback: wenn nichts passt, vollen Text zurueckgeben.
     """
-    import re
-    kontennachweis_marker = re.compile(
-        r"Kontennachweis\s+zur?\s+(Gewinn|G\.?u\.?V)", re.IGNORECASE)
-    overview_marker = re.compile(
-        r"Gewinn-?\s*und\s*Verlustrechnung|"
-        r"Gewinnermittlung\s+nach\s+§\s*4\s+Abs|"
-        r"\bBETRIEBSEINNAHMEN\b|\bBETRIEBSAUSGABEN\b",
-        re.IGNORECASE)
-    exclude_marker = re.compile(
-        r"\bAKTIVA\b|\bPASSIVA\b|"  # Bilanz
-        r"Anlagenspiegel|Entwicklung\s+des\s+Anlageverm|"  # Anlagenspiegel
-        r"Allgemeine\s+Auftragsbedingungen",  # AGBs
-        re.IGNORECASE)
-
     doc = _open_pdf(data)
     try:
-        matched_pages: list[int] = []
-        for i, page in enumerate(doc):
-            text = page.get_text("text")
-            if exclude_marker.search(text):
-                continue
-            if (kontennachweis_marker.search(text)
-                    or overview_marker.search(text)):
-                matched_pages.append(i)
-
-        if not matched_pages:
+        pages_text = [page.get_text("text") for page in doc]
+        selected = _select_guv_pages(pages_text)
+        if not selected:
             # Keine spezifische Seite erkannt → vollen Text zurueckgeben
-            parts = []
-            for i, page in enumerate(doc, start=1):
-                parts.append(f"=== Seite {i} ===\n{page.get_text('text')}")
-            return "\n\n".join(parts)
-
-        # Eine Puffer-Seite hinter dem letzten Treffer mitnehmen
-        # (falls Fortsetzung ohne Header). Aber nur wenn Puffer-Seite kein
-        # Excluded-Inhalt hat.
-        last = matched_pages[-1]
-        if last + 1 < doc.page_count:
-            buffer_text = doc[last + 1].get_text("text")
-            if not exclude_marker.search(buffer_text):
-                matched_pages.append(last + 1)
-
-        parts = []
-        for i in matched_pages:
-            parts.append(f"=== Seite {i+1} ===\n{doc[i].get_text('text')}")
-        return "\n\n".join(parts)
+            selected = list(range(len(pages_text)))
+        return "\n\n".join(
+            f"=== Seite {i + 1} ===\n{pages_text[i]}" for i in selected)
     finally:
         doc.close()

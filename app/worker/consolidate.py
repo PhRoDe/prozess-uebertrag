@@ -12,6 +12,30 @@ from typing import Any
 
 MISMATCH_TOLERANCE = 0.01  # 1 cent
 
+# Kanonische GKV-Reihenfolge nach §275 HGB (Slug → Rang). Steuert die
+# Sortierung der konsolidierten GuV-Positionen, wenn Steuerberater über mehrere
+# Jahre inkonsistent nummerieren (z.B. Zinsaufwand mal als Pos 9, mal weggelassen).
+_GKV_RANK: dict[str, int] = {
+    sec: i for i, sec in enumerate([
+        "umsatzerloese",
+        "bestandsveraenderung",
+        "aktivierte_eigenleistungen",
+        "sonst_betr_ertraege",
+        "materialaufwand_rhb",
+        "materialaufwand_bez_leistungen",
+        "personalaufwand_loehne",
+        "personalaufwand_sozial",
+        "abschreibungen",
+        "sonst_betr_aufw",
+        "ertraege_beteiligungen",
+        "ertraege_wertpapiere",
+        "sonstige_zins_ertraege",
+        "zinsaufwand",
+        "ee_steuern",
+        "sonst_steuern",
+    ])
+}
+
 
 def _normalize_bestand_value(group: dict, value):
     """Bestandsveränderung universal vorzeichen-normalisieren.
@@ -141,7 +165,13 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
         _ingest_ja(doc, col_idx, col["year"], groups_by_name, group_template,
                    questions, newest_ja_year=newest_ja["year"] if ja_docs else None)
 
-    # 5. Jede BWA-Extraktion einsortieren (nur Gruppen-Summen, keine Konten)
+    # 5. Jede BWA-Extraktion einsortieren (nur Gruppen-Summen, keine Konten).
+    # Vor dem Einsortieren die JA-Template-Namen festhalten — neu angehängte
+    # Gruppen sind BWA-/Susa-Eigengruppen und dürfen NICHT in die HGB-§275-
+    # Renummerierung (Schritt 9.5), auch wenn sie eine gkv_section tragen
+    # (Susa vergibt z.B. personalaufwand_loehne) — sonst würden BWA-Aggregate
+    # in den JA-GuV-Block gezogen.
+    ja_origin_names = set(groups_by_name)
     for col_idx, col in enumerate(columns):
         if col["kind"] != "bwa":
             continue
@@ -182,6 +212,14 @@ def merge_extractions(extractions: list[dict[str, Any]]) -> dict[str, Any]:
     endwert_label = None
     if ja_docs:
         endwert_label = newest_ja.get("endwert_label")
+
+    # 9.5 HGB-§275-Positionen in kanonische GKV-Reihenfolge bringen und
+    # durchgehend neu nummerieren — verhindert Dubletten/Lücken in der
+    # Nummerierung, wenn STBs über Jahre inkonsistent nummerieren (Prisma-Bug
+    # 06/2026). Nur für HGB-GuV; EÜR (A./B./D.-Struktur) und BWA-/Susa-only
+    # bleiben unangetastet.
+    if ja_docs and not _looks_like_euer(groups_out, endwert_label):
+        groups_out = _renumber_and_reorder_hgb(groups_out, ja_origin_names)
 
     return {"columns": columns, "groups": groups_out, "questions": questions,
             "pdf_jue_per_column": pdf_jue_per_column,
@@ -733,6 +771,107 @@ def _insert_missing_parents(tpl: list[dict]) -> list[dict]:
             })
             inserted.add(parent)
         out.append(g)
+    return out
+
+
+def _strip_leading_position_number(name: str) -> str:
+    """'4. Materialaufwand' → 'Materialaufwand', '11.sonstige Steuern' →
+    'sonstige Steuern'. Lässt Namen ohne führende Nummer unverändert."""
+    return re.sub(r"^\s*\d+\s*\.\s*", "", name or "").strip()
+
+
+def _strip_leading_sub_label(name: str) -> str:
+    """'4. a) Aufwendungen für RHB' → 'Aufwendungen für RHB'. Entfernt sowohl
+    die Positions-Nummer als auch den Buchstaben-Marker."""
+    s = re.sub(r"^\s*\d+\s*\.\s*", "", name or "")
+    s = re.sub(r"^\s*[A-Za-z]\s*\)\s*", "", s)
+    return s.strip()
+
+
+def _looks_like_euer(groups: list[dict], endwert_label: str | None) -> bool:
+    """EÜR (§4 Abs 3 EStG) erkennen — dort darf NICHT in 1..N umnummeriert
+    werden, weil die Hauptsektionen A./B./D. die Struktur tragen."""
+    lbl = (endwert_label or "").lower()
+    if any(tok in lbl for tok in ("steuerlich", "§4", "§ 4", "abs. 3", "abs 3")):
+        return True
+    for g in groups:
+        for key in ("name", "sub_group_of"):
+            if re.match(r"^\s*[A-E]\.\s", g.get(key) or ""):
+                return True
+    return False
+
+
+def _renumber_and_reorder_hgb(groups: list[dict],
+                              ja_origin_names: set[str] | None = None) -> list[dict]:
+    """HGB-§275-GuV-Positionen in kanonische GKV-Reihenfolge sortieren und
+    durchgehend neu nummerieren (1., 2., 3., … plus a)/b) für Sub-Gruppen).
+
+    Motivation (Prisma-Bug 06/2026): Steuerberater nummerieren über Jahre
+    inkonsistent (Zinsaufwand mal Pos 9, mal weggelassen). Template aus dem
+    jüngsten JA + ans-Ende-angehängte Positionen → Dubletten ('9.' zweimal)
+    und falsche Reihenfolge. Hier wird eine konsistente Nummerierung erzwungen.
+
+    Nur GKV-klassifizierte JA-Positionen (gkv_section in `_GKV_RANK` UND aus
+    einem JA stammend) werden sortiert + nummeriert. Andere Gruppen (BWA-/Susa-
+    Eigengruppen — auch mit gkv_section! —, Bilanzgewinn, neutrale) bleiben
+    unverändert an ihrer Stelle (via carry-Sortierschlüssel). Block = Top-Level-
+    Gruppe + ihre Sub-Gruppen (bleiben zusammen).
+    """
+    ja_origin_names = ja_origin_names if ja_origin_names is not None else {
+        g["name"] for g in groups}
+    top_level_names = {g["name"] for g in groups if g.get("sub_group_of") is None}
+
+    # Blöcke bilden: jede Top-Level-Gruppe (oder Orphan-Sub) + ihre Subs.
+    blocks: list[tuple[int, dict, list[dict]]] = []
+    for idx, g in enumerate(groups):
+        parent = g.get("sub_group_of")
+        if parent and parent in top_level_names:
+            continue  # echte Sub-Gruppe → im Block ihres Parents
+        subs = [s for s in groups if s.get("sub_group_of") == g["name"]]
+        blocks.append((idx, g, subs))
+
+    def block_rank(parent: dict, subs: list[dict]) -> int | None:
+        # Nur JA-Eigengruppen renummerieren; BWA-/Susa-Gruppen bleiben außen vor.
+        members = [parent, *subs]
+        if not any(m["name"] in ja_origin_names for m in members):
+            return None
+        secs = [parent.get("gkv_section")] + [s.get("gkv_section") for s in subs]
+        ranks = [_GKV_RANK[s] for s in secs if s in _GKV_RANK]
+        return min(ranks) if ranks else None
+
+    # Klassifizierte GuV-Positionen (rank) werden nach GKV-Reihenfolge sortiert
+    # und VORANGESTELLT; nicht-klassifizierte Blöcke (BWA-Aggregate, Bilanz-
+    # gewinn, neutrale) behalten ihre Original-Reihenfolge und folgen danach.
+    # (Kein carry-Trick: eine spät angehängte GuV-Position wie Zinsaufwand
+    # würde sonst nachfolgende BWA-Blöcke vor die Steuern ziehen.)
+    ranked: list[tuple[int, int, dict, list[dict]]] = []
+    unranked: list[tuple[dict, list[dict]]] = []
+    for idx, parent, subs in blocks:
+        r = block_rank(parent, subs)
+        if r is None:
+            unranked.append((parent, subs))
+        else:
+            ranked.append((r, idx, parent, subs))
+    ranked.sort(key=lambda x: (x[0], x[1]))
+
+    out: list[dict] = []
+    counter = 0
+    letters = "abcdefghijklmnop"
+    for _r, _idx, parent, subs in ranked:
+        counter += 1
+        new_parent = dict(parent)
+        new_parent["name"] = f"{counter}. {_strip_leading_position_number(parent['name'])}"
+        out.append(new_parent)
+        for li, sub in enumerate(subs):
+            new_sub = dict(sub)
+            new_sub["name"] = (
+                f"{counter}. {letters[li]}) {_strip_leading_sub_label(sub['name'])}"
+            )
+            new_sub["sub_group_of"] = new_parent["name"]
+            out.append(new_sub)
+    for parent, subs in unranked:
+        out.append(parent)
+        out.extend(subs)
     return out
 
 

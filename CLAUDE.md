@@ -42,7 +42,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 121 Tests müssen grün sein
+.venv/bin/pytest                                  # 128 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -433,6 +433,23 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
   fehlendes JA hochladen.
 - **Spalten-Inversion + Hierarchie-Mix** (beide Tasteone 2026-05, gefixt) →
   siehe Regeln `_normalize_column_signs` bzw. `_build_section_to_tpl` oben.
+- **Mehrseitiger Kontennachweis** (Prisma 2026-06, gefixt): `extract_guv_section`
+  schickte Claude nur Header-tragende Seiten + 1 Puffer. Der Header steht aber
+  nur auf der **ersten** Kontennachweis-Seite → Folgeseiten (Pos. 6-12 mit
+  Unterkonten) gingen verloren. Fix: `_select_guv_pages` startet ab einer echten
+  GuV-Tabellenseite (Marker + Betrag-Dichte) einen **Run vorwärts** durch alle
+  nicht-ausgeschlossenen Folgeseiten bis Exclude/EOF. Prosa-Erwähnungen (0
+  Beträge) starten keinen Run. Unit-getestet in `test_pdf_detect.py`.
+- **HGB-§275-Renummerierung** (Prisma 2026-06): STBs nummerieren über Jahre
+  inkonsistent (Zinsaufwand mal Pos 9, mal weggelassen → nach Merge zwei „9."
+  + Zinsaufwand am Ende). `_renumber_and_reorder_hgb` (consolidate) sortiert die
+  GKV-klassifizierten **JA-Positionen** (`_GKV_RANK`) in §275-Reihenfolge und
+  nummeriert durchgehend neu (1., 2., … plus a)/b) für Subs). **Nur HGB-GuV** —
+  EÜR (A./B./D.-Struktur, `_looks_like_euer`) und BWA-/Susa-Eigengruppen (nicht
+  in `ja_origin_names`, auch mit gkv_section) bleiben unangetastet. Konsequenz:
+  Auch ein sauberer Einzel-JA wird auf 1..N verdichtet (statt §275-Lücken) — das
+  ist gewollt (konsistent & lückenlos), weicht aber bewusst von „PDF-Nummern
+  1:1" ab.
 - **Review-Screen** triggert nur wenn Claude echte `open_questions` liefert.
   Nach dem Umbau (PDF-Gliederung 1:1) passiert das selten. Wenn ein
   exotisches PDF reinkommt das Claude nicht einordnet → Review-UI zeigt alle
@@ -443,7 +460,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 121 Tests (Stand 2026-06-12)
+.venv/bin/pytest                      # 128 Tests (Stand 2026-06-13)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 
