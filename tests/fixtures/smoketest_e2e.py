@@ -72,15 +72,22 @@ def report(name: str, result: dict) -> None:
 
 
 def main(pdf_paths: list[Path]) -> int:
+    from app.worker.tasks import _extract_pdf  # gleiche Logik wie Produktion
     client = ClaudeClient()
     extractions = []
     for p in pdf_paths:
         if not p.exists():
             print(f"FEHLER: {p} nicht gefunden", file=sys.stderr)
             return 2
-        result = extract_one(client, p)
-        report(p.name, result)
-        extractions.append(result)
+        print(f"\n→ {p.name}")
+        results = _extract_pdf(client, p.read_bytes())
+        if len(results) > 1:
+            print(f"  → Bundle: {len(results)} Extraktionen "
+                  f"({', '.join(r.get('type') for r in results)})")
+        for result in results:
+            result["file"] = p.name
+            report(p.name, result)
+            extractions.append(result)
 
     print("\n→ consolidate")
     cons = merge_extractions(extractions)

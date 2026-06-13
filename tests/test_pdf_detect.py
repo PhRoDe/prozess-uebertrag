@@ -3,7 +3,7 @@ import fitz
 import pytest
 from app.worker.pdf_detect import (
     classify_pdf, pdf_to_images, extract_text, PdfKind, PdfError,
-    _select_guv_pages,
+    _select_guv_pages, _select_susa_pages, _has_susa_section,
 )
 
 
@@ -115,3 +115,27 @@ def test_select_guv_pages_fallback_returns_all_when_no_match():
     # Kein Treffer → Fallback signalisiert "alle Seiten" (leere Auswahl =
     # extract_guv_section gibt vollen Text zurück; hier prüfen wir die Auswahl).
     assert _select_guv_pages(pages) == []
+
+
+# --- Susa-Seitenauswahl im kombinierten BWA+Susa-Bundle ----------------------
+
+def test_select_susa_pages_picks_susa_excludes_bwa_and_opos():
+    """DATEV-Bundle (Prisma 06/2026): S1-2 BWA, S3-5 Susa ('Summen und Salden',
+    Header auf jeder Seite), S6-7 OPOS-Liste. Nur die Susa-Seiten dürfen
+    gewählt werden — OPOS-Seiten (mit Beträgen, aber kein Susa-Marker) NICHT."""
+    pages = [
+        "Bezeichnung Dez/2025 Ges.-Leistg. Pers.-Kosten\n" + _amounts(40),   # 0 BWA
+        "Bezeichnung Jan/2025 - Dez/2025 Veränderung\n" + _amounts(40),       # 1 BWA
+        "Summen und Salden (pro Monat) Dezember 2025 Blatt 1\n" + _amounts(50),  # 2 Susa
+        "Summen und Salden (pro Monat) Dezember 2025 Blatt 2\n" + _amounts(50),  # 3 Susa
+        "Summen und Salden (pro Monat) Dezember 2025 Blatt 3\n" + _amounts(30),  # 4 Susa
+        "Kanzlei-Rechnungswesen OPOS-Liste\n" + _amounts(20),                # 5 OPOS
+        "Kanzlei-Rechnungswesen OPOS-Liste\n" + _amounts(20),                # 6 OPOS
+    ]
+    assert _select_susa_pages(pages) == [2, 3, 4]
+
+
+def test_has_susa_section_detects_marker():
+    assert _has_susa_section("... Summen und Salden (pro Monat) ...")
+    assert _has_susa_section("Alle bebuchten Konten ohne Null-Saldo")
+    assert not _has_susa_section("Gewinn- und Verlustrechnung 1. Umsatzerlöse")

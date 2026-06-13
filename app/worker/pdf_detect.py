@@ -129,6 +129,44 @@ def extract_text(data: bytes) -> str:
         doc.close()
 
 
+# Susa-Marker (DATEV "Summen und Salden" / "Alle bebuchten Konten" /
+# Saldenliste). Der Header wiederholt sich auf JEDER Susa-Seite — daher reicht
+# Marker-Match (kein Ride-Forward), das hält OPOS-/USt-Seiten ohne Marker raus.
+_SUSA_MARKER = re.compile(
+    r"Summen\s+und\s+Salden|bebuchten\s+Konten|Saldenliste", re.IGNORECASE)
+
+
+def _has_susa_section(text: str) -> bool:
+    """True wenn der (volle) PDF-Text einen Susa-Abschnitt enthält — auch wenn
+    eine BWA davorsteht (kombiniertes DATEV-Bundle)."""
+    return bool(_SUSA_MARKER.search(text or ""))
+
+
+def _select_susa_pages(pages_text: list[str]) -> list[int]:
+    """Seiten-Indizes der Susa ('Summen und Salden') im (ggf. kombinierten)
+    PDF. Reiner Marker-Match: jede Susa-Seite trägt den Header, OPOS-/USt-/BWA-
+    Seiten nicht → sauber abgegrenzt ohne Ride-Forward. Leer = kein Susa-Teil."""
+    return [i for i, t in enumerate(pages_text) if _SUSA_MARKER.search(t or "")]
+
+
+def extract_susa_section(data: bytes) -> str:
+    """Nur die Susa-Seiten ('Summen und Salden') eines kombinierten DATEV-
+    Bundles (BWA + Susa + OPOS/USt) extrahieren — für den SUSA-Prompt. So
+    bekommt Claude die Einzelkonten ohne BWA-Aggregat-/OPOS-Rauschen.
+
+    Fallback: kein Susa-Marker → voller Text."""
+    doc = _open_pdf(data)
+    try:
+        pages_text = [page.get_text("text") for page in doc]
+        selected = _select_susa_pages(pages_text)
+        if not selected:
+            selected = list(range(len(pages_text)))
+        return "\n\n".join(
+            f"=== Seite {i + 1} ===\n{pages_text[i]}" for i in selected)
+    finally:
+        doc.close()
+
+
 def extract_guv_section(data: bytes) -> str:
     """Extract the GuV/EÜR overview + Kontennachweis pages from a JA-PDF.
 

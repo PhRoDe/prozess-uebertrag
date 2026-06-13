@@ -10,6 +10,9 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
   Hinzurechnungen + Kürzungen → Steuerlicher Gewinn
 - **BWA** (kurz oder detailliert mit Konten)
 - **Susa** (DATEV-Roh-Saldenliste, Klassen 2-8; Bilanz/Saldenvorträge raus)
+- **Kombiniertes DATEV-Bundle** (BWA + Susa + OPOS/USt in EINER PDF) → der
+  Worker emittiert ZWEI Spalten je Periode: BWA-Aggregat (Vorläufiges
+  Ergebnis) + Susa-Einzelkonten (Detail), siehe `_extract_pdf` in tasks.py
 
 ## Wo es läuft
 
@@ -42,7 +45,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 130 Tests müssen grün sein
+.venv/bin/pytest                                  # 134 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -457,11 +460,20 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
   Gruppen aus der konsolidierten Struktur als Dropdown.
 - **Scan-PDFs** dauern 2-4 min und kosten ~0,40-0,60 €/PDF (Claude Vision).
   Nicht blockieren bei großen Scan-Deals, aber User warnen.
+- **Kombiniertes BWA+Susa-Bundle** (Prisma 2026-06): DATEV exportiert BWA-
+  Aggregat + „Summen und Salden"-Susa + OPOS/USt in EINER PDF. Klassifikation
+  (erste 5000 Zeichen = BWA-Seite) → `bwa`, zog früher nur das Aggregat (0
+  Konten). Fix: `_extract_pdf` (tasks.py) erkennt via `_has_susa_section` einen
+  Susa-Teil und extrahiert ihn zusätzlich mit dem SUSA-Prompt aus den Susa-
+  Seiten (`extract_susa_section`, reiner Marker-Match — hält OPOS/USt raus).
+  Ergebnis: zwei Spalten je Periode (BWA-Aggregat + Susa-Detail). Die Susa-
+  Spalte hat bewusst KEINE Jahresüberschuss-Zelle (Susa hat keinen Endwert) —
+  das Periodenergebnis steht in der parallelen BWA-Spalte (Vorläufiges Ergebnis).
 
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 130 Tests (Stand 2026-06-13)
+.venv/bin/pytest                      # 134 Tests (Stand 2026-06-13)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 

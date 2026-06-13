@@ -118,6 +118,67 @@ def test_extract_handles_string_open_questions():
         assert not failed_calls, f"Job sollte nicht failen, aber: {failed_calls}"
 
 
+def test_extract_bundle_bwa_plus_susa_emits_two_extractions():
+    """Prisma 06/2026: kombiniertes DATEV-Bundle (BWA-Aggregat + 'Summen und
+    Salden'-Susa in EINER PDF) muss ZWEI Extraktionen liefern — BWA + Susa-
+    Detail — damit die Einzelkonten als eigene Spalte erscheinen."""
+    from app.worker.tasks import extract_job
+    bundle_text = "Bezeichnung Dez/2025 BWA ... Summen und Salden (pro Monat) ..."
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value=bundle_text), \
+         patch("app.worker.tasks.extract_susa_section", return_value="susa pages"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "bwa"
+
+        def fake_extract(text, doc_type=None, **kw):
+            return {"type": doc_type, "year": 2025,
+                    "groups": [], "open_questions": []}
+        claude.extract_text_pdf.side_effect = fake_extract
+
+        extract_job("job-1")
+
+        repo.set_extraction.assert_called_once()
+        payload = repo.set_extraction.call_args.args[1]
+        types = sorted(d["type"] for d in payload["documents"])
+        assert types == ["bwa", "susa"], f"erwartet BWA+Susa, war {types}"
+        # Susa-Extraktion lief über extract_susa_section, nicht über vollen Text
+        susa_calls = [c for c in claude.extract_text_pdf.call_args_list
+                      if c.kwargs.get("doc_type") == "susa"]
+        assert susa_calls and susa_calls[0].args[0] == "susa pages"
+
+
+def test_extract_pure_bwa_without_susa_stays_single():
+    """Reine BWA ohne Susa-Abschnitt → genau EINE Extraktion (kein Susa-Doppel)."""
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="BWA Kurzform nur Aggregat-Positionen"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF-fake"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "bwa"
+        claude.extract_text_pdf.return_value = {
+            "type": "bwa", "year": 2025, "groups": [], "open_questions": []}
+        extract_job("job-1")
+        payload = repo.set_extraction.call_args.args[1]
+        assert len(payload["documents"]) == 1
+
+
 def test_resume_stuck_jobs_retries_extracting():
     """Fix 1A: nach Deploy-Restart müssen extracting-Jobs wieder aufgenommen werden."""
     from app.worker import tasks as tasks_mod

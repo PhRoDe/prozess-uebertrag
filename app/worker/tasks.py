@@ -15,7 +15,10 @@ from app.models import JobStatus
 from app.storage import StorageClient
 from app.worker.claude_client import ClaudeClient, ExtractionError
 from app.worker.consolidate import merge_extractions
-from app.worker.pdf_detect import PdfKind, classify_pdf, extract_guv_section, extract_text, pdf_to_images
+from app.worker.pdf_detect import (
+    PdfKind, classify_pdf, extract_guv_section, extract_susa_section,
+    extract_text, pdf_to_images, _has_susa_section,
+)
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +27,42 @@ NODE_ID = f"{socket.gethostname()}-{os.getpid()}"
 
 TERMINAL_STATES = {JobStatus.READY, JobStatus.REVIEW_NEEDED,
                    JobStatus.FAILED, JobStatus.EXPIRED}
+
+
+def _extract_pdf(claude: ClaudeClient, data: bytes) -> list[dict]:
+    """Extrahiere ein PDF → eine oder ZWEI Extraktionen.
+
+    Kombiniertes DATEV-Bundle (BWA-Aggregat + 'Summen und Salden'-Susa in einer
+    PDF): liefert ZWEI Extraktionen — das BWA-Aggregat (mit Vorläufigem Ergebnis
+    als Endwert) UND die Susa-Einzelkonten (Detail-Spalte). Sonst genau eine.
+    Susa-Detail wird nur aus den Susa-Seiten gezogen (extract_susa_section),
+    damit OPOS-/USt-Seiten nicht ins Detail wandern.
+    """
+    kind = classify_pdf(data)
+    if kind != PdfKind.TEXT:
+        doc_type = claude.classify_document("SCAN-BILDDATEN")
+        pages = pdf_to_images(data)
+        return [claude.extract_scan_pdf(pages, doc_type=doc_type)]
+
+    # Klassifikation auf Basis der ersten 5000 Zeichen (Titelseite)
+    full_text = extract_text(data)
+    doc_type = claude.classify_document(full_text[:5000])
+
+    if doc_type == "bwa":
+        out = [claude.extract_text_pdf(full_text, doc_type="bwa")]
+        # Bundle: enthält die PDF zusätzlich eine Susa → Einzelkonten als
+        # eigene Detail-Spalte mitnehmen (User-Wunsch: BWA-Aggregat + Detail).
+        if _has_susa_section(full_text):
+            out.append(claude.extract_text_pdf(
+                extract_susa_section(data), doc_type="susa"))
+        return out
+    if doc_type == "susa":
+        # Reine Susa (oder als susa klassifiziertes Bundle): nur die Susa-Seiten.
+        return [claude.extract_text_pdf(
+            extract_susa_section(data), doc_type="susa")]
+    # JAs koennen 60+ Seiten haben → nur GuV-Kontennachweis an Claude.
+    return [claude.extract_text_pdf(
+        extract_guv_section(data), doc_type="jahresabschluss")]
 
 
 def extract_job(job_id: str) -> None:
@@ -55,28 +94,9 @@ def extract_job(job_id: str) -> None:
         extractions: list[dict] = []
         for input_file in job.input_files:
             data = storage.download_input(input_file.storage_path)
-            kind = classify_pdf(data)
-
-            if kind == PdfKind.TEXT:
-                # Klassifikation auf Basis der ersten 5000 Zeichen (Titelseite)
-                doc_type = claude.classify_document(extract_text(data)[:5000])
-                if doc_type in ("bwa", "susa"):
-                    # BWA und Susa sind meist kurz → kompletter Text
-                    extraction = claude.extract_text_pdf(
-                        extract_text(data), doc_type=doc_type)
-                else:
-                    # JAs koennen 60+ Seiten haben → nur GuV-Kontennachweis an Claude.
-                    # Das spart Tokens und verhindert dass Claude den Fokus verliert.
-                    guv_text = extract_guv_section(data)
-                    extraction = claude.extract_text_pdf(
-                        guv_text, doc_type="jahresabschluss")
-            else:
-                doc_type = claude.classify_document("SCAN-BILDDATEN")
-                pages = pdf_to_images(data)
-                extraction = claude.extract_scan_pdf(pages, doc_type=doc_type)
-
-            extraction["file"] = input_file.name
-            extractions.append(extraction)
+            for extraction in _extract_pdf(claude, data):
+                extraction["file"] = input_file.name
+                extractions.append(extraction)
 
         consolidated = merge_extractions(extractions)
         # open_questions für Review-Screen: nur aus der jüngsten JA (die ist am relevantesten).
