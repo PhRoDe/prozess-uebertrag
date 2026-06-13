@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from app.db import JobsRepo
+from app.db import JobsRepo, completeness_summary
 from app.models import JobStatus
 from app.routes.pages import require_auth
 from app.worker.tasks import finalize_job
@@ -48,12 +48,15 @@ def job_status(request: Request, job_id: str):
     # Gruppennamen für den Review-Dropdown kommen jetzt aus der konsolidierten
     # Struktur (dynamisch aus den PDFs), nicht mehr aus fester Hierarchie.
     all_groups: list[str] = []
+    consolidated = None
     if job.extraction and job.extraction.get("consolidated"):
-        all_groups = [g["name"] for g in job.extraction["consolidated"].get("groups", [])]
+        consolidated = job.extraction["consolidated"]
+        all_groups = [g["name"] for g in consolidated.get("groups", [])]
     return templates.TemplateResponse(request, partial, {
         "job": job,
         "status_label": STATUS_LABELS.get(job.status, ""),
         "all_detail_groups": all_groups,
+        "completeness": completeness_summary(consolidated),
     })
 
 

@@ -159,3 +159,55 @@ def test_project_source_type_uses_doc_type_for_susa():
     }
     li, _grp = project_line_items("job-1", cons)
     assert li[0]["source_type"] == "susa"
+
+
+# --- Phase 3a: Vollständigkeits-Panel (read-only View-Model) ---
+
+def test_completeness_summary_zaehlt_luecken_und_vollstaendige():
+    from app.db import completeness_summary
+    cons = {
+        "groups": [{"name": "A"}, {"name": "B"}, {"name": "C"}],
+        "questions": [
+            {"type": "completeness_gap", "group": "A", "year": 2024,
+             "diff": -100.0, "printed_sum": 1000.0, "acc_sum": 900.0,
+             "document": "x.pdf"},
+            {"type": "unmatched_account", "year": 2024},  # anderer Typ → ignoriert
+        ],
+    }
+    s = completeness_summary(cons)
+    assert s["has_gaps"] is True
+    assert len(s["gaps"]) == 1
+    assert s["gaps"][0]["group"] == "A"
+    assert s["total_groups"] == 3
+    assert s["complete_groups"] == 2  # B + C ohne Lücke
+
+
+def test_completeness_summary_keine_luecken():
+    from app.db import completeness_summary
+    s = completeness_summary({"groups": [{"name": "A"}], "questions": []})
+    assert s["has_gaps"] is False
+    assert s["complete_groups"] == 1
+    assert s["gaps"] == []
+
+
+def test_completeness_summary_robust_gegen_none():
+    from app.db import completeness_summary
+    s = completeness_summary(None)
+    assert s["has_gaps"] is False
+    assert s["total_groups"] == 0
+
+
+def test_completeness_summary_kein_widerspruch_bei_umnummerierung():
+    """Codex P2: gap.group trägt den Roh-Extraktionsnamen, consolidated.groups
+    den umnummerierten (HGB-Renumber). complete_groups darf NICHT per Namens-
+    Match berechnet werden — sonst meldet das Panel 'alle vollständig' UND
+    listet gleichzeitig eine Lücke (Widerspruch)."""
+    from app.db import completeness_summary
+    cons = {
+        "groups": [{"name": "8. Abschreibungen"}, {"name": "9. Sonstige"}],
+        "questions": [{"type": "completeness_gap", "group": "Abschreibungen",
+                       "diff": 100.0}],
+    }
+    s = completeness_summary(cons)
+    assert s["has_gaps"] is True
+    assert s["complete_groups"] < s["total_groups"]

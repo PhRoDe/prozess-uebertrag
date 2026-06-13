@@ -171,6 +171,35 @@ def project_line_items(job_id: str, consolidated: dict[str, Any]
     return line_items, group_rows
 
 
+def completeness_summary(consolidated: dict[str, Any] | None) -> dict[str, Any]:
+    """View-Model fürs read-only Vollständigkeits-Panel (Phase 3a). Rein.
+
+    Liest die completeness_gap-Einträge aus consolidated.questions (verbleibende
+    Lücken nach der Selbstheilung) und zählt, wie viele Positionen vollständig
+    sind. Andere Frage-Typen (unmatched_account etc.) werden ignoriert — die
+    laufen über den bestehenden open_questions-Dropdown.
+    """
+    consolidated = consolidated or {}
+    groups = consolidated.get("groups") or []
+    questions = consolidated.get("questions") or []
+    gaps = [q for q in questions if q.get("type") == "completeness_gap"]
+    total_groups = len(groups)
+    # complete_groups NICHT per Namens-Match: gap.group trägt den Roh-
+    # Extraktionsnamen, consolidated.groups ggf. den HGB-umnummerierten —
+    # ein Match würde scheitern und "alle vollständig" neben gelisteten
+    # Lücken melden (Widerspruch, Codex P2). Stattdessen über die Anzahl
+    # distinkter Lücken-Gruppen rechnen (mehrere Perioden derselben Gruppe
+    # zählen einmal).
+    gap_group_count = len({g.get("group") for g in gaps})
+    complete_groups = max(0, total_groups - gap_group_count)
+    return {
+        "gaps": gaps,
+        "total_groups": total_groups,
+        "complete_groups": complete_groups,
+        "has_gaps": bool(gaps),
+    }
+
+
 class LineItemsRepo:
     """Relationale Konten-Schicht (Phase 2). Schreibt die abgeleiteten
     line_items/line_item_groups eines Jobs. Idempotent: alte Zeilen des Jobs

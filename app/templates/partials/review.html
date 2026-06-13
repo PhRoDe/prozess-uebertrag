@@ -1,5 +1,52 @@
 {% set open_questions = job.extraction.open_questions if job.extraction else [] %}
-<div id="job-state" class="bg-white rounded-lg shadow-sm border p-8">
+<div id="job-state">
+{% if completeness %}
+<div class="bg-white rounded-lg shadow-sm border p-6 mb-4">
+  <h2 class="text-lg font-semibold mb-1">Vollständigkeits-Check</h2>
+  {% if completeness.has_gaps %}
+    <p class="text-slate-600 text-sm mb-4">
+      {{ completeness.complete_groups }} von {{ completeness.total_groups }} Positionen vollständig.
+      Bei {{ completeness.gaps|length }} Position(en) weicht die Summe der erfassten Konten
+      von der gedruckten Gruppensumme ab — die Differenz wird im Excel als
+      <em>Restposten</em> ausgewiesen, damit die Summe stimmt.
+    </p>
+    <div class="space-y-3">
+      {% for g in completeness.gaps %}
+      <div class="border rounded-md p-4 bg-amber-50 border-amber-200">
+        <div class="flex justify-between items-start">
+          <div>
+            <p class="font-medium">{{ g.group or "—" }}</p>
+            <code class="text-xs text-slate-500">
+              {{ g.year or "" }}{% if g.document %} · {{ g.document }}{% endif %}
+            </code>
+          </div>
+          <div class="text-right text-sm font-mono">
+            {% if (g.diff or 0) >= 0 %}
+              <div class="text-amber-700">fehlend {{ "%.2f" % (g.diff|abs) }} €</div>
+            {% else %}
+              <div class="text-amber-700">Überhang {{ "%.2f" % (g.diff|abs) }} €</div>
+            {% endif %}
+            <div class="text-xs text-slate-500">
+              gedruckt {{ "%.2f" % (g.printed_sum or 0) }} ·
+              erfasst {{ "%.2f" % (g.acc_sum or 0) }}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="text-xs text-slate-400 mt-3">
+      Tipp: fehlt ein ganzer Kontennachweis-Teil, das vollständige PDF erneut hochladen.
+    </p>
+  {% else %}
+    <p class="text-emerald-700 text-sm">
+      ✓ Alle {{ completeness.total_groups }} Positionen vollständig — Konten-Summen
+      stimmen mit den gedruckten Gruppensummen überein.
+    </p>
+  {% endif %}
+</div>
+{% endif %}
+<div class="bg-white rounded-lg shadow-sm border p-8">
   {% if open_questions %}
     <h2 class="text-xl font-semibold mb-2">{{ open_questions|length }} Konten brauchen deine Zuordnung</h2>
     <p class="text-slate-600 text-sm mb-6">Claude konnte diese Zeilen keiner Gruppe im Kontennachweis zuordnen:</p>
@@ -45,4 +92,5 @@
       </button>
     </form>
   {% endif %}
+</div>
 </div>
