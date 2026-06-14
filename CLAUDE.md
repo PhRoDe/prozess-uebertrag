@@ -171,14 +171,20 @@ per Name-Match (Defense-in-Depth, falls Claude die Section vergisst).
 
 | Datei | Zweck |
 |---|---|
-| `app/worker/prompts.py` | Extraktions-Prompts für Claude (HGB-GuV+EÜR / BWA / Susa) — Quelle der Wahrheit für "wie soll das JSON aussehen" |
-| `app/worker/claude_client.py` | anthropic SDK Wrapper, doc_type-aware (`extract_text_pdf(doc_type=...)`), 429-Retry, `<pdf_content>`-Delimiter |
-| `app/worker/consolidate.py` | Multi-Jahr-Merging, Spalten-Bau (JA+BWA getrennt), Vorjahres-Cross-Check |
-| `app/excel/builder.py` | Dynamisches Layout, Summe-zuerst, sign-aware Jahresergebnis |
-| `app/routes/pages.py` | Login, Home, Logout |
-| `app/routes/upload.py` | PDF-Upload, Rate-Limit, Filename-Sanitize |
-| `app/routes/job.py` | Status-Polling, Review-Screen, Finalize |
-| `app/worker/tasks.py` | Background-Orchestrator, Idempotent + Claim-Pattern |
+| `app/worker/prompts.py` | Extraktions-Prompts für Claude (HGB-GuV+EÜR / BWA / Susa) inkl. `company_name` + `REEXTRACT_PROMPT` — Quelle der Wahrheit fürs JSON |
+| `app/worker/claude_client.py` | anthropic SDK Wrapper, doc_type-aware, 429-Retry, `reextract_groups` (Selbstheilung) |
+| `app/worker/consolidate.py` | Multi-Jahr-Merging, Spalten-Bau (JA+BWA/Susa getrennt, `doc_type` pro Spalte), HGB-§275-Renummerierung, Vorzeichen-Normalisierung |
+| `app/worker/verify.py` | Vollständigkeits-Check (`document_completeness`) + Selbstheilung (`heal_extraction`, max 2 Runden) |
+| `app/excel/builder.py` | Dynamisches Layout, Summe-zuerst, sign-aware JÜ, Restposten, `group_column_value` (geteilt mit metrics), `_reconcile_completeness_questions` |
+| `app/completeness.py` | Geteilte Lücken-Logik (`completeness_gaps`) für Review-Panel UND Fragen-Sheet — eine kanonische Quelle |
+| `app/metrics.py` | Benchmarking-Kennzahlen (`compute_company_metrics`, METRICS_VERSION=2) — nutzt geteilte builder-Vorzeichenlogik |
+| `app/industries.py` | Kontrollierte Calandi-Branchenliste (~39, Single Source of Truth, Seed für `industry_categories`) |
+| `app/db.py` | Repos: `JobsRepo`, `LineItemsRepo`, `PdfCacheRepo`, `CompaniesRepo`, `MetricsRepo` + `completeness_summary`/`project_line_items` (rein) |
+| `app/routes/pages.py` | Home + Auth-Helfer (`require_auth`/`current_user`/`job_owner_ok`, Authentik-Header) |
+| `app/routes/upload.py` | PDF-Upload, Rate-Limit, Filename-Sanitize, begrenztes Lesen, `created_by` |
+| `app/routes/job.py` | Status-Polling, Review (Firma+Branche + Vollständigkeits-Panel + manuelle Korrektur), Finalize, `/uebertraege`-Liste |
+| `app/routes/download.py` | Signed-URL-Download (owner-scoped) |
+| `app/worker/tasks.py` | Background-Orchestrator (idempotent + Claim), PDF-Cache, `_materialize_metrics`, `_collect_completeness_questions` |
 | `app/ratelimit.py` | In-Memory-Limiter, X-Forwarded-For-aware (hinter Reverse-Proxy) |
 
 ## Wichtige Regeln (nicht brechen)
