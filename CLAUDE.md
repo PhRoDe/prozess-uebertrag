@@ -414,6 +414,17 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 
 ## Offene Punkte (TODO)
 
+- **Benchmarking Phase C — Vergleichs-UI (offen):** Phase A (Firma+Branche+
+  `/uebertraege`) und Phase B (Kennzahlen `company_year_metrics`, v2 mit dualen
+  Margen/EBITDA/Quoten/`verfahren`) sind **live**. Offen ist die Vergleichs-
+  Oberfläche: Peer-Gruppe nach `branche_code` × `fiscal_year` × `verfahren='gkv'`,
+  Median/Quartile, eine Firma gegen ihre Peers. Datenfundament ist exakt darauf
+  ausgelegt. Vor dem Bau: genug getaggte Überträge sammeln (sonst leere Peer-
+  Gruppen). Council-Vorgaben (Umsatz-Default-Margen, Scope-Ehrlichkeit: keine
+  Bilanz-KPIs versprechen, Filter completeness/restposten) in
+  `~/.claude/projects/.../memory/benchmarking-roadmap.md`. **Scope-Hinweis in der
+  UI Pflicht:** GuV-basiert — kein Working Capital/ROE/Cashflow (braucht Bilanz).
+
 - **Supabase-Service-Key-Leak (2026-04-24, Railway-Variables) — Status nach
   Cutover klären:** mit Thomas/Leon verifizieren, ob der in die Server-`.env`
   eingetragene Key der **rotierte** oder noch der **geleakte** ist. Runbook:
