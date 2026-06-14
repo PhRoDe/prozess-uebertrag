@@ -167,6 +167,12 @@ def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
             continue
         if g.get("gkv_section") in BILANZGEWINN_SECTIONS:
             continue
+        # Bestandsveränderung ausschließen (wie der Builder beim Restposten):
+        # das Detail ist vorzeichen-normalisiert (Verminderung → negativ), der
+        # gedruckte Anker bleibt roh positiv → printed − acc = 2×|wert| wäre eine
+        # Fake-Lücke und würde den completeness_score grundlos drücken.
+        if g.get("gkv_section") == "bestandsveraenderung":
+            continue
         printed = (g.get("column_sums") or {}).get(col_idx)
         if not isinstance(printed, (int, float)):
             continue

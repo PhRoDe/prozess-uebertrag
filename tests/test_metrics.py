@@ -171,3 +171,20 @@ def test_metrics_v2_verfahren_gkv_und_aktivierungsquote():
     assert m["aktivierungsquote"] == 0.2                   # 200 / 1000
     assert m["materialquote_umsatz"] == round(300.0 / 800.0, 4)
     assert m["materialquote_gesamtleistung"] == 0.3
+
+
+def test_metrics_bestandsveraenderung_verzerrt_completeness_nicht():
+    """Real-Befund (Prisma): Bestandsveränderung ist vorzeichen-normalisiert
+    (gedruckt +X, Detail −X). Das darf den completeness_score NICHT drücken
+    (sonst Fake-Lücke 2×|X|). Ausgeschlossen wie beim Builder-Restposten."""
+    cons = {"columns": [{"label": "2023", "kind": "ja", "doc_type": "ja", "year": 2023}],
+            "groups": [
+                {"name": "1. Umsatz", "gkv_section": "umsatzerloese", "type": "ertrag",
+                 "column_sums": {0: 1000.0}, "accounts": [{"konto_nr": "8400", "values": {0: 1000.0}}]},
+                {"name": "2. Verminderung des Bestandes", "gkv_section": "bestandsveraenderung",
+                 "type": "ertrag", "column_sums": {0: 1641810.23},   # roher Anker positiv
+                 "accounts": [{"konto_nr": "", "values": {0: -1641810.23}}]},  # normalisiert negativ
+            ]}
+    m = compute_company_metrics(cons, 0)
+    assert m["restposten_anteil"] == 0.0      # Umsatz voll, Bestandsv. nicht gezählt
+    assert m["completeness_score"] == 1.0
