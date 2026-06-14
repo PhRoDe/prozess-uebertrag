@@ -26,7 +26,9 @@ from app.excel.builder import (
     _infer_sign_conventions, BILANZGEWINN_SECTIONS, SECTION_ROLE,
 )
 
-METRICS_VERSION = 1
+METRICS_VERSION = 2  # v2 (Council 2026-06-14): Umsatz-Default-Margen, EBITDA,
+                     # ebit_analytisch, Material-/Abschr.-/Aktivierungsquote,
+                     # Zinsdeckung, Steuerquote, verfahren-Heuristik (gkv/None)
 
 # gkv_section → Kennzahl-Bucket
 _SECTION_BUCKET: dict[str, str] = {
@@ -147,6 +149,13 @@ def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
     # + neutrales_ergebnis − steuern. Bei computed jue (kein PDF-Anker) = 0.
     neutrales_ergebnis = jue + b["steuern"] - betriebsergebnis - finanzergebnis
 
+    # v2-Kennzahlen (Council 2026-06-14):
+    ebitda = betriebsergebnis + b["abschreibungen"]
+    # ebit_analytisch = Banker-EBIT (Ergebnis vor Zinsen + Steuern), aus der
+    # authoritativen JÜ zurückgerechnet — robust auch bei neutralen Posten.
+    ebit_analytisch = jue + b["steuern"] + b["zinsaufwand"]
+    aktivierungsgrad = b["bestandsveraenderung"] + b["aktivierte_eigenleistungen"]
+
     # Datenqualität: Anteil der Gruppensummen, der NICHT durch Detail-Konten
     # gedeckt ist (Restposten-Lücke). consolidated enthält keine Restposten.
     total_printed = 0.0
@@ -168,27 +177,57 @@ def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
     has_open_questions = any(q.get("type") == "unmatched_account"
                              for q in (consolidated.get("questions") or []))
 
+    # GuV-Verfahren (Council): UKV-Aufsteller sind bei Rohertrag/Material nicht
+    # mit GKV vergleichbar. Heuristik: GKV-typische Sektionen vorhanden → 'gkv',
+    # sonst unbekannt (Benchmark filtert default auf gkv).
+    gkv_marker = {"bestandsveraenderung", "aktivierte_eigenleistungen",
+                  "materialaufwand_rhb", "materialaufwand_bez_leistungen"}
+    seen_sections = {g.get("gkv_section") for g in groups}
+    verfahren = "gkv" if (seen_sections & gkv_marker) else None
+
+    u = b["umsatz"]
+    gl = gesamtleistung
     return {
-        "umsatz": round(b["umsatz"], 2),
-        "gesamtleistung": round(gesamtleistung, 2),
+        # Absolutwerte
+        "umsatz": round(u, 2),
+        "gesamtleistung": round(gl, 2),
         "materialaufwand": round(b["materialaufwand"], 2),
         "rohertrag": round(rohertrag, 2),
         "personalaufwand": round(b["personalaufwand"], 2),
         "abschreibungen": round(b["abschreibungen"], 2),
         "sonst_betr_aufw": round(b["sonst_betr_aufw"], 2),
+        "sonst_betr_ertraege": round(b["sonst_betr_ertraege"], 2),
+        "finanzertraege": round(b["finanzertraege"], 2),
+        "zinsaufwand": round(b["zinsaufwand"], 2),
         "betriebsergebnis": round(betriebsergebnis, 2),
+        "ebitda": round(ebitda, 2),
         "finanzergebnis": round(finanzergebnis, 2),
+        "ebit_analytisch": round(ebit_analytisch, 2),
         "neutrales_ergebnis": round(neutrales_ergebnis, 2),
         "steuern": round(b["steuern"], 2),
         "jue": round(jue, 2),
-        # Alle Quoten auf Gesamtleistung (konsistent + kein Datenverlust bei
-        # Umsatz≈0 mit echter Gesamtleistung, z.B. Bauproduktion/Holding).
-        "personalaufwandsquote": _div(b["personalaufwand"], gesamtleistung),
-        "rohertragsmarge": _div(rohertrag, gesamtleistung),
-        "ebit_marge": _div(betriebsergebnis, gesamtleistung),
-        "jue_marge": _div(jue, gesamtleistung),
+        # Margen DUAL (Umsatz = Default für externe Vergleiche; Gesamtleistung
+        # als GKV-Sekundärsicht — Council: Bestandsv./aktiv. Eigenl. verzerren).
+        "rohertragsmarge_umsatz": _div(rohertrag, u),
+        "rohertragsmarge_gesamtleistung": _div(rohertrag, gl),
+        "betriebsergebnis_marge_umsatz": _div(betriebsergebnis, u),
+        "betriebsergebnis_marge_gesamtleistung": _div(betriebsergebnis, gl),
+        "ebitda_marge_umsatz": _div(ebitda, u),
+        "ebitda_marge_gesamtleistung": _div(ebitda, gl),
+        "jue_marge_umsatz": _div(jue, u),
+        "jue_marge_gesamtleistung": _div(jue, gl),
+        "materialquote_umsatz": _div(b["materialaufwand"], u),
+        "materialquote_gesamtleistung": _div(b["materialaufwand"], gl),
+        # Quoten (Einzelbasis)
+        "personalaufwandsquote": _div(b["personalaufwand"], gl),
+        "abschreibungsquote_umsatz": _div(b["abschreibungen"], u),
+        "aktivierungsquote": _div(aktivierungsgrad, gl),
+        "zinsdeckung": _div(betriebsergebnis, b["zinsaufwand"]),
+        "steuerquote": _div(b["steuern"], ergebnis_vor_steuern),
+        # Qualität + Meta
         "completeness_score": completeness_score,
         "restposten_anteil": restposten_anteil,
         "has_open_questions": has_open_questions,
+        "verfahren": verfahren,
         "metrics_version": METRICS_VERSION,
     }
