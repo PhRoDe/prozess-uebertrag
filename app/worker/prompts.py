@@ -143,6 +143,11 @@ REGELN:
     nach §4 Abs. 3 EStG" oder "Jahresfehlbetrag" — übernimm den exakten Text
     als Label. Wenn weggelassen, nutzt der Builder "Jahresüberschuss".
 
+12c. **`company_name`** (optional, Top-Level-String): der Firmenname des
+    Mandanten, exakt wie auf der Deckseite / im Kopf des Abschlusses (inkl.
+    Rechtsform, z.B. "Mustermann Bau GmbH"). Nur übernehmen wenn eindeutig
+    erkennbar — sonst weglassen. Keine Adresse, keine Steuernummer.
+
 RÜCKGABEFORMAT (HGB-GuV-Beispiel):
 
 {
@@ -150,6 +155,7 @@ RÜCKGABEFORMAT (HGB-GuV-Beispiel):
   "year": 2024,
   "previous_year": 2023,
   "sign_convention": "expenses_negative",
+  "company_name": "Mustermann Bau GmbH",
   "pdf_jahresueberschuss_gj": 170834.90,
   "pdf_jahresueberschuss_vj": 215441.07,
   "endwert_label": "Jahresüberschuss",

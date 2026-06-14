@@ -87,6 +87,32 @@ class JobsRepo:
             "processing_node": None,
         }).eq("id", job_id).execute()
 
+    def list_for_user(self, username: str | None, limit: int = 200) -> list[dict[str, Any]]:
+        """Überträge des Users (created_by == user ODER legacy NULL) inkl.
+        Firma (FK-Embed), neueste zuerst. Flache Dicts fürs Listen-Template
+        (Phase A3) — kein volles Job-Model nötig."""
+        sel = ("id,status,created_at,output_path,source_type,input_files,"
+               "companies(name,branche_code)")
+        q = self.client.table("jobs").select(sel)
+        if username:
+            q = q.or_(f"created_by.eq.{username},created_by.is.null")
+        resp = q.order("created_at", desc=True).limit(limit).execute()
+        out: list[dict[str, Any]] = []
+        for r in (resp.data or []):
+            comp = r.get("companies") or {}
+            files = r.get("input_files") or []
+            out.append({
+                "id": r.get("id"),
+                "status": r.get("status"),
+                "created_at": r.get("created_at"),
+                "source_type": r.get("source_type"),
+                "company_name": comp.get("name"),
+                "branche_code": comp.get("branche_code"),
+                "file_names": [f.get("name") for f in files if isinstance(f, dict)],
+                "has_output": bool(r.get("output_path")),
+            })
+        return out
+
     def _row_to_job(self, row: dict[str, Any]) -> Job:
         return Job.model_validate(row)
 
@@ -278,6 +304,14 @@ class CompaniesRepo:
         if not resp.data:
             return None
         return Company.model_validate(resp.data[0])
+
+    def update(self, company_id: str, **fields: Any) -> None:
+        """Erlaubte Felder einer bestehenden Firma aktualisieren (z.B. Branche
+        nachtragen bei einem Folge-Upload). Nur bekannte Felder, leeres Update
+        wird übersprungen."""
+        upd = {k: v for k, v in fields.items() if k in self._FIELDS}
+        if upd:
+            self.client.table("companies").update(upd).eq("id", company_id).execute()
 
     def find_by_name(self, name: str, created_by: str | None) -> Company | None:
         """Firma per (Name, Owner) finden — für find-or-create beim Verknüpfen,

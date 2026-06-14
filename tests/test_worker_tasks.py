@@ -487,3 +487,29 @@ def test_extract_pdf_cache_fehler_faellt_auf_extraktion_zurueck():
                       side_effect=lambda ext, fn: (ext, [])):
         out = tasks._extract_pdf(claude, b"PDFBYTES", cache=cache)
     assert out[0]["type"] == "jahresabschluss"
+
+
+def test_extract_setzt_company_suggestion_aus_ja():
+    """Phase A2: company_name aus dem JA wird als company_suggestion in den
+    Payload gelegt (Prefill im Review)."""
+    from app.worker.tasks import extract_job
+    with patch("app.worker.tasks.JobsRepo") as Repo, \
+         patch("app.worker.tasks.ClaudeClient") as Claude, \
+         patch("app.worker.tasks.StorageClient") as Storage, \
+         patch("app.worker.tasks.classify_pdf") as cls, \
+         patch("app.worker.tasks.extract_text", return_value="text " * 20), \
+         patch("app.worker.tasks.extract_guv_section", return_value="GuV"):
+        repo = Repo.return_value
+        repo.try_claim.return_value = True
+        repo.get.return_value = make_job(status=JobStatus.UPLOADED)
+        Storage.return_value.download_input.return_value = b"%PDF"
+        from app.worker.pdf_detect import PdfKind
+        cls.return_value = PdfKind.TEXT
+        claude = Claude.return_value
+        claude.classify_document.return_value = "jahresabschluss"
+        claude.extract_text_pdf.return_value = {
+            "type": "jahresabschluss", "year": 2024, "groups": [],
+            "open_questions": [], "company_name": "Mustermann Bau GmbH"}
+        extract_job("job-1")
+        payload = repo.set_extraction.call_args.args[1]
+        assert payload["company_suggestion"] == "Mustermann Bau GmbH"

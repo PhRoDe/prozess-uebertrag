@@ -2,10 +2,14 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from app.db import JobsRepo, completeness_summary
+from app.db import JobsRepo, CompaniesRepo, completeness_summary
+from app.industries import industry_choices, is_valid_industry
 from app.models import JobStatus
-from app.routes.pages import require_auth, job_owner_ok
+from app.routes.pages import require_auth, job_owner_ok, current_user
 from app.worker.tasks import finalize_job
+import logging
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -25,6 +29,21 @@ STATUS_LABELS = {
     JobStatus.EXTRACTING: "Claude liest die PDFs und extrahiert die Konten …",
     JobStatus.FINALIZING: "Excel wird gebaut …",
 }
+
+
+@router.get("/uebertraege", response_class=HTMLResponse)
+def my_jobs(request: Request):
+    """Übersicht „Meine Überträge" (Phase A3): Firma · Branche · Datum · Quelle ·
+    Status · Download — so ist erkennbar, welcher Übertrag zu welcher Firma gehört."""
+    if not require_auth(request):
+        raise HTTPException(status_code=401)
+    user = current_user(request)["username"]
+    jobs = JobsRepo().list_for_user(user)
+    labels = {i["code"]: i["label"] for i in industry_choices()}
+    for j in jobs:
+        j["branche_label"] = labels.get(j.get("branche_code"))
+    return templates.TemplateResponse(request, "jobs_list.html",
+                                      {"jobs": jobs, "user": user})
 
 
 @router.get("/job/{job_id}", response_class=HTMLResponse)
@@ -56,11 +75,16 @@ def job_status(request: Request, job_id: str):
     if job.extraction and job.extraction.get("consolidated"):
         consolidated = job.extraction["consolidated"]
         all_groups = [g["name"] for g in consolidated.get("groups", [])]
+    company_suggestion = ""
+    if job.extraction:
+        company_suggestion = job.extraction.get("company_suggestion") or ""
     return templates.TemplateResponse(request, partial, {
         "job": job,
         "status_label": STATUS_LABELS.get(job.status, ""),
         "all_detail_groups": all_groups,
         "completeness": completeness_summary(consolidated),
+        "industries": industry_choices(),
+        "company_suggestion": company_suggestion,
     })
 
 
@@ -133,19 +157,67 @@ def parse_finalize_form(items) -> dict:
     return review
 
 
+def parse_company_form(items) -> dict:
+    """Firmen-Felder aus dem Finalize-Formular (Phase A). Rein.
+    Leerer/fehlender Name → {} (keine Verknüpfung). Unbekannte branche_code →
+    verworfen (FK-Schutz)."""
+    f = {k: v for k, v in items if k.startswith("company_")}
+    name = (f.get("company_name") or "").strip()
+    if not name:
+        return {}
+    branche_code = (f.get("company_branche_code") or "").strip() or None
+    if not is_valid_industry(branche_code):
+        branche_code = None
+    out: dict = {"name": name}
+    if branche_code:
+        out["branche_code"] = branche_code
+    for key, col in (("company_branche_label", "branche_label"),
+                     ("company_rechtsform", "rechtsform")):
+        val = (f.get(key) or "").strip()
+        if val:
+            out[col] = val
+    return out
+
+
+def _link_company(job_id: str, company_fields: dict, username: str | None) -> None:
+    """Firma find-or-create (per Name+Owner) und an den Job hängen. Best-effort:
+    ein Fehler darf den Übertrag NICHT blockieren (Excel wird trotzdem gebaut)."""
+    if not company_fields:
+        return
+    try:
+        repo = CompaniesRepo()
+        extra = {k: v for k, v in company_fields.items() if k != "name"}
+        existing = repo.find_by_name(company_fields["name"], username)
+        if existing:
+            # Folge-Upload: vom User neu/zusätzlich angegebene Felder übernehmen
+            # (z.B. Branche, die beim ersten Mal fehlte).
+            if extra:
+                repo.update(existing.id, **extra)
+            company = existing
+        else:
+            company = repo.create(company_fields["name"], created_by=username, **extra)
+        JobsRepo().set_company(job_id, company.id)
+    except Exception:
+        log.exception("link_company failed (non-critical) for %s", job_id)
+
+
 @router.post("/job/{job_id}/finalize", response_class=HTMLResponse)
 async def job_finalize(request: Request, job_id: str, background: BackgroundTasks):
     if not require_auth(request):
         raise HTTPException(status_code=401)
 
     form = await request.form()
-    review = parse_finalize_form(form.multi_items())
+    items = form.multi_items()
+    review = parse_finalize_form(items)
 
     job = JobsRepo().get(job_id)
     if not job:
         raise HTTPException(status_code=404)
     if not job_owner_ok(request, job):
         raise HTTPException(status_code=403)
+
+    # Firma erfassen/verknüpfen (Phase A) — vor dem Build, best-effort.
+    _link_company(job_id, parse_company_form(items), current_user(request)["username"])
 
     background.add_task(finalize_job, job_id, review)
     # Update status immediately so the partial shows the spinner on next poll

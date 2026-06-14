@@ -97,3 +97,29 @@ def test_job_owner_ok_leerer_string_nicht_offen():
     gespeichert) darf NICHT alle Jobs öffnen → kein IDOR."""
     from app.routes.pages import job_owner_ok
     assert job_owner_ok(_FakeReq("bob"), _FakeJob("")) is False
+
+
+# --- Phase A2: Firma erfassen ---
+
+def test_parse_company_form_vollstaendig():
+    from app.routes.job import parse_company_form
+    out = parse_company_form([
+        ("company_name", "  Acme GmbH "), ("company_branche_code", "it_software"),
+        ("company_rechtsform", "GmbH"), ("company_branche_label", "B2B SaaS"),
+        ("review[1]", "X"),
+    ])
+    assert out == {"name": "Acme GmbH", "branche_code": "it_software",
+                   "branche_label": "B2B SaaS", "rechtsform": "GmbH"}
+
+
+def test_parse_company_form_leerer_name_keine_firma():
+    from app.routes.job import parse_company_form
+    assert parse_company_form([("company_name", "   "),
+                               ("company_branche_code", "it_software")]) == {}
+
+
+def test_parse_company_form_unbekannte_branche_verworfen():
+    from app.routes.job import parse_company_form
+    out = parse_company_form([("company_name", "Acme"),
+                              ("company_branche_code", "gibtsnicht")])
+    assert out == {"name": "Acme"}   # ungültige Branche raus (FK-Schutz)

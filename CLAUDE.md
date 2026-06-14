@@ -29,7 +29,7 @@ Original-PDF 1:1 übernimmt** (nicht HGB-normalisiert).
 | Deploy | **Push auf `main` → Auto-Deploy** (Server: `git reset --hard origin/main` → `docker compose build` → `up -d`) |
 | Secrets | server-seitig in `/srv/calandi/uebertrag-stack/.env` (nicht im Repo) |
 | Code-Repo | https://github.com/PhRoDe/prozess-uebertrag (privat), Deploy-Key `calandi-server` |
-| Supabase | Projekt `prozess-uebertrag` (Frankfurt, ref `msqpaiyptgrchomgdpxa`), Migrationen **manuell**. Tabellen: `jobs` (App) + `keepalive` (calandi-tools-Heartbeat, siehe Regeln) |
+| Supabase | Projekt `prozess-uebertrag` (Frankfurt, ref `msqpaiyptgrchomgdpxa`), Migrationen **manuell**. Tabellen: `jobs` (App, mit `created_by`/`company_id`) + `companies` + `industry_categories` + `line_items`/`line_item_groups` (Audit) + `pdf_extractions` (Cache) + `keepalive` (Heartbeat) |
 
 Wie der Cutover (Railway → Hetzner/Authentik) lief — historisch:
 `docs/runbooks/2026-06-11-hetzner-authentik-cutover.md`.
@@ -45,7 +45,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 216 Tests müssen grün sein
+.venv/bin/pytest                                  # 232 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -502,7 +502,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 216 Tests (Stand 2026-06-13)
+.venv/bin/pytest                      # 232 Tests (Stand 2026-06-14)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 

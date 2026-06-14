@@ -31,7 +31,7 @@ NODE_ID = f"{socket.gethostname()}-{os.getpid()}"
 # Pipeline-Cache-Version (Phase 4): bei Änderungen an der Extraktions-/Heilungs-
 # /Prompt-Logik bumpen, um gecachte Extraktionen zu invalidieren (Cache-Key =
 # pdf_hash × f"{model}:v{_CACHE_VERSION}").
-_CACHE_VERSION = "1"
+_CACHE_VERSION = "2"  # v2: company_name im JA-Prompt ergänzt (Phase A2)
 
 TERMINAL_STATES = {JobStatus.READY, JobStatus.REVIEW_NEEDED,
                    JobStatus.FAILED, JobStatus.EXPIRED}
@@ -217,10 +217,18 @@ def extract_job(job_id: str) -> None:
                     })
                 else:
                     open_questions.append({**oq, "document": file_name})
+        # Firmenname-Vorschlag (Phase A): erster JA mit company_name → Prefill
+        # im Review (User bestätigt + ergänzt Branche).
+        company_suggestion = next(
+            (d.get("company_name") for d in extractions
+             if d.get("type") == "jahresabschluss" and d.get("company_name")),
+            None,
+        ) or next((d.get("company_name") for d in extractions if d.get("company_name")), None)
         payload = {
             "documents": extractions,
             "consolidated": consolidated,
             "open_questions": open_questions,
+            "company_suggestion": company_suggestion,
         }
         repo.set_extraction(job_id, payload)
         # Phase 2: relationale Konten-Schicht (line_items) materialisieren.

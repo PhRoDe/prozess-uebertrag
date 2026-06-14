@@ -2,6 +2,43 @@
 <div id="job-state">
 <form hx-post="/job/{{ job.id }}/finalize" hx-target="#job-state" hx-swap="outerHTML">
 
+  <div class="bg-white rounded-lg shadow-sm border p-6 mb-4">
+    <h2 class="text-lg font-semibold mb-1">Firma & Branche</h2>
+    <p class="text-slate-600 text-sm mb-4">
+      Ordne den Übertrag einer Firma + Branche zu — so lassen sich später Firmen
+      derselben Branche vergleichen.{% if company_suggestion %} Vorschlag aus dem PDF übernommen.{% endif %}
+    </p>
+    <div class="grid grid-cols-2 gap-3 text-sm">
+      <label class="col-span-2">
+        <span class="text-slate-500">Firmenname</span>
+        <input type="text" name="company_name" value="{{ company_suggestion }}"
+               placeholder="z.B. Mustermann Bau GmbH"
+               class="w-full mt-1 px-3 py-2 border rounded-md bg-white">
+      </label>
+      <label>
+        <span class="text-slate-500">Branche</span>
+        <select name="company_branche_code"
+                class="w-full mt-1 px-3 py-2 border rounded-md bg-white">
+          <option value="">— Branche wählen —</option>
+          {% for ind in industries %}
+            <option value="{{ ind.code }}">{{ ind.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span class="text-slate-500">Rechtsform (optional)</span>
+        <input type="text" name="company_rechtsform" placeholder="z.B. GmbH"
+               class="w-full mt-1 px-3 py-2 border rounded-md bg-white">
+      </label>
+      <label class="col-span-2">
+        <span class="text-slate-500">Branchen-Notiz (optional)</span>
+        <input type="text" name="company_branche_label"
+               placeholder="z.B. B2B-SaaS HR-Software"
+               class="w-full mt-1 px-3 py-2 border rounded-md bg-white">
+      </label>
+    </div>
+  </div>
+
   {% if completeness %}
   <div class="bg-white rounded-lg shadow-sm border p-6 mb-4">
     <h2 class="text-lg font-semibold mb-1">Vollständigkeits-Check</h2>

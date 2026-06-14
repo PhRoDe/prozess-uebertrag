@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
+<div class="mb-4 text-right">
+  <a href="/uebertraege" class="text-sm text-blue-600 hover:text-blue-700">Meine Überträge →</a>
+</div>
 <form id="upload-form" hx-post="/upload" hx-encoding="multipart/form-data"
       hx-indicator="#upload-spinner"
       class="bg-white rounded-lg shadow-sm border p-8">
