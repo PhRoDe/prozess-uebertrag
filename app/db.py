@@ -3,7 +3,7 @@ from typing import Any
 from supabase import create_client, Client
 from app.config import get_settings
 from app.completeness import completeness_gaps, ja_columns, leaf_group_names, _col_get
-from app.models import Job, InputFile, JobStatus
+from app.models import Job, InputFile, JobStatus, Company
 
 
 class JobsRepo:
@@ -60,6 +60,17 @@ class JobsRepo:
     def list_resumable(self) -> list[Job]:
         resp = self.client.rpc("jobs_pending_resume", {}).execute()
         return [self._row_to_job(r) for r in (resp.data or [])]
+
+    def set_company(self, job_id: str, company_id: str,
+                    metadata: dict[str, Any] | None = None) -> None:
+        """Job mit einer Firma verknüpfen (+ optionale Perioden-/Quellen-
+        Metadaten). Phase A."""
+        updates: dict[str, Any] = {"company_id": company_id}
+        for key in ("source_type", "period_start", "period_end",
+                    "coverage_months", "is_consolidated"):
+            if metadata and key in metadata:
+                updates[key] = metadata[key]
+        self.client.table("jobs").update(updates).eq("id", job_id).execute()
 
     def set_extraction(self, job_id: str, extraction: dict[str, Any]) -> None:
         self.client.table("jobs").update({
@@ -239,3 +250,48 @@ class PdfCacheRepo:
             {"pdf_hash": pdf_hash, "model": model, "extractions": extractions},
             on_conflict="pdf_hash,model",
         ).execute()
+
+
+class CompaniesRepo:
+    """Firmen-Entität (Phase A, Benchmarking-Fundament). Mehrere Jobs/Jahre pro
+    Firma. branche_code referenziert die kontrollierte Liste (app/industries.py),
+    branche_label ist die optionale Freitext-Notiz (Hybrid)."""
+
+    _FIELDS = ("rechtsform", "branche_code", "branche_label",
+               "revenue_band", "employee_band")
+
+    def __init__(self, client: Client | None = None) -> None:
+        s = get_settings()
+        self.client = client or create_client(s.supabase_url, s.supabase_service_key)
+
+    def create(self, name: str, created_by: str | None = None, **fields: Any) -> Company:
+        row: dict[str, Any] = {"name": name, "created_by": created_by}
+        for key in self._FIELDS:
+            if key in fields:
+                row[key] = fields[key]
+        resp = self.client.table("companies").insert(row).execute()
+        return Company.model_validate(resp.data[0])
+
+    def get(self, company_id: str) -> Company | None:
+        resp = (self.client.table("companies").select("*")
+                .eq("id", company_id).execute())
+        if not resp.data:
+            return None
+        return Company.model_validate(resp.data[0])
+
+    def find_by_name(self, name: str, created_by: str | None) -> Company | None:
+        """Firma per (Name, Owner) finden — für find-or-create beim Verknüpfen,
+        damit mehrere Jahre derselben Firma EINER company_id zugeordnet werden."""
+        q = self.client.table("companies").select("*").eq("name", name)
+        q = q.is_("created_by", "null") if created_by is None else q.eq("created_by", created_by)
+        resp = q.execute()
+        if not resp.data:
+            return None
+        return Company.model_validate(resp.data[0])
+
+    def list_for_user(self, username: str | None) -> list[Company]:
+        """Firmen des Users (created_by). Legacy-Firmen ohne created_by sind für
+        alle sichtbar (analog job_owner_ok)."""
+        resp = self.client.table("companies").select("*").order("name").execute()
+        out = [Company.model_validate(r) for r in (resp.data or [])]
+        return [c for c in out if c.created_by is None or c.created_by == username]
