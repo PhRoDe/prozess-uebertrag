@@ -45,7 +45,7 @@ cp .env.example .env
 # → ANTHROPIC_API_KEY + SUPABASE_URL + SUPABASE_SERVICE_KEY eintragen
 #   (Werte in 1Password "Calandi/Prozess-Uebertrag"). Auth läuft über
 #   Authentik (Forward-Auth) — kein App-Passwort, kein SESSION_SECRET mehr.
-.venv/bin/pytest                                  # 233 Tests müssen grün sein
+.venv/bin/pytest                                  # 235 Tests müssen grün sein
 .venv/bin/uvicorn app.main:app --reload           # http://localhost:8000
 # Lokal: geschützte Routen brauchen den X-Authentik-Username-Header (injiziert
 # nur nginx). Lokal faken, z.B. curl -H "X-Authentik-Username: dev" …
@@ -502,7 +502,7 @@ Supabase-Key-Rotation: `docs/runbooks/2026-06-10-supabase-key-rotation.md`.
 ## Test-Suite
 
 ```bash
-.venv/bin/pytest                      # 233 Tests (Stand 2026-06-14)
+.venv/bin/pytest                      # 235 Tests (Stand 2026-06-14)
 .venv/bin/pytest tests/test_xxx.py   # einzelnes Modul
 ```
 

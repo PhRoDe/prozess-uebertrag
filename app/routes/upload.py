@@ -60,9 +60,12 @@ async def upload(
 
     input_files: list[InputFile] = []
     try:
+        limit = s.max_file_size_mb * 1024 * 1024
         for f in files:
-            data = await f.read()
-            if len(data) > s.max_file_size_mb * 1024 * 1024:
+            # Begrenzt lesen (max. limit+1 Bytes): sonst zieht eine riesige Datei
+            # erst komplett in den RAM, bevor der Size-Check greift (Memory-DoS).
+            data = await f.read(limit + 1)
+            if len(data) > limit:
                 raise HTTPException(
                     status_code=400,
                     detail=f"{f.filename} > {s.max_file_size_mb} MB",
