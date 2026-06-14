@@ -23,7 +23,7 @@ Quoten (NULL bei Nenner ~0):
 """
 from app.excel.builder import (
     _coerce_int_keys, _endwert_groups, _resolve_role, group_column_value,
-    _infer_sign_conventions, BILANZGEWINN_SECTIONS,
+    _infer_sign_conventions, BILANZGEWINN_SECTIONS, SECTION_ROLE,
 )
 
 METRICS_VERSION = 1
@@ -67,6 +67,17 @@ def _own_account_sum(g: dict, col_idx: int) -> float:
     return total
 
 
+def _acc_incl_children(g: dict, groups: list[dict], col_idx: int) -> float:
+    """Eigene + (bei Top-Level-Parent) Kind-Konten — OHNE column_sum-Fallback.
+    Für die Restposten-/Quality-Schätzung bei verschachtelten Strukturen."""
+    total = _own_account_sum(g, col_idx)
+    if g.get("sub_group_of") is None:
+        for sub in groups:
+            if sub.get("sub_group_of") == g.get("name"):
+                total += _own_account_sum(sub, col_idx)
+    return total
+
+
 def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
     """Kennzahlen für EINE JA-Spalte (col_idx). None wenn nichts Verwertbares.
 
@@ -78,21 +89,37 @@ def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
     columns = consolidated.get("columns") or []
     if col_idx < 0 or col_idx >= len(columns):
         return None
+    # JA-only: BWA/Susa haben andere Endwert-Semantik (Council: data_source nie
+    # mischen). Diese Funktion ist für JA-Spalten — nicht-JA → None (Guard).
+    if (columns[col_idx].get("doc_type") or columns[col_idx].get("kind")) in ("bwa", "susa"):
+        return None
     columns = _infer_sign_conventions(columns, groups)
     conv = columns[col_idx].get("sign_convention", "expenses_negative")
+
+    # Sub-Gruppen tragen die gkv_section nicht immer (Konten im Kind, Sektion am
+    # Parent) — effektive Sektion: eigene ODER die des Parents erben.
+    section_by_name = {g.get("name"): g.get("gkv_section") for g in groups}
+
+    def _eff_section(g: dict):
+        sec = g.get("gkv_section")
+        if sec:
+            return sec
+        parent = g.get("sub_group_of")
+        return section_by_name.get(parent) if parent else None
 
     b: dict[str, float] = {k: 0.0 for k in _BUCKETS}
     saw_value = False
     for g in _endwert_groups(groups):
-        if g.get("gkv_section") in BILANZGEWINN_SECTIONS:
+        eff_sec = _eff_section(g)
+        if eff_sec in BILANZGEWINN_SECTIONS:
             continue
-        bucket = _SECTION_BUCKET.get(g.get("gkv_section"))
+        bucket = _SECTION_BUCKET.get(eff_sec)
         if bucket is None:
             continue
         raw = group_column_value(g, groups, col_idx)
         if raw:
             saw_value = True
-        role = _resolve_role(g)
+        role = SECTION_ROLE.get(eff_sec) or _resolve_role(g)
         # kanonische Magnitude: Erträge behalten ihr (positives) Vorzeichen
         # (Bestandsveränderung darf negativ bleiben); Aufwand/Steuer werden zur
         # positiven Kosten-Magnitude (in expenses_negative: raw×−1).
@@ -125,13 +152,17 @@ def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
     total_printed = 0.0
     total_gap = 0.0
     for g in groups:
+        # Nur Top-Level (Kinder via _acc_incl_children) → keine Doppelzählung,
+        # erfasst verschachtelte Lücken (Parent trägt Summe, Konten in Kindern).
+        if g.get("sub_group_of") is not None:
+            continue
         if g.get("gkv_section") in BILANZGEWINN_SECTIONS:
             continue
         printed = (g.get("column_sums") or {}).get(col_idx)
-        if not isinstance(printed, (int, float)) or not (g.get("accounts")):
+        if not isinstance(printed, (int, float)):
             continue
         total_printed += abs(printed)
-        total_gap += abs(printed - _own_account_sum(g, col_idx))
+        total_gap += abs(printed - _acc_incl_children(g, groups, col_idx))
     restposten_anteil = round(total_gap / total_printed, 4) if total_printed > 0.01 else 0.0
     completeness_score = round(max(0.0, 1.0 - restposten_anteil), 4)
     has_open_questions = any(q.get("type") == "unmatched_account"
@@ -150,10 +181,12 @@ def compute_company_metrics(consolidated: dict, col_idx: int) -> dict | None:
         "neutrales_ergebnis": round(neutrales_ergebnis, 2),
         "steuern": round(b["steuern"], 2),
         "jue": round(jue, 2),
+        # Alle Quoten auf Gesamtleistung (konsistent + kein Datenverlust bei
+        # Umsatz≈0 mit echter Gesamtleistung, z.B. Bauproduktion/Holding).
         "personalaufwandsquote": _div(b["personalaufwand"], gesamtleistung),
         "rohertragsmarge": _div(rohertrag, gesamtleistung),
-        "ebit_marge": _div(betriebsergebnis, b["umsatz"]),
-        "jue_marge": _div(jue, b["umsatz"]),
+        "ebit_marge": _div(betriebsergebnis, gesamtleistung),
+        "jue_marge": _div(jue, gesamtleistung),
         "completeness_score": completeness_score,
         "restposten_anteil": restposten_anteil,
         "has_open_questions": has_open_questions,

@@ -83,3 +83,43 @@ def test_metrics_neutrales_ergebnis_rekonsiliert_zur_pdf_jue():
 def test_metrics_neutrales_ergebnis_null_ohne_anker():
     m = compute_company_metrics(_cons("neg"), 0)   # kein pdf_jue → computed
     assert m["neutrales_ergebnis"] == 0.0
+
+
+def test_metrics_bwa_spalte_gibt_none():
+    """JA-only Guard: BWA/Susa-Spalte → None (andere Endwert-Semantik)."""
+    cons = {"columns": [{"label": "BWA 2025", "kind": "bwa", "doc_type": "bwa", "year": 2025}],
+            "groups": [{"name": "U", "gkv_section": "umsatzerloese", "type": "ertrag",
+                        "column_sums": {0: 500.0}, "accounts": [{"konto_nr": "8", "values": {0: 500.0}}]}]}
+    assert compute_company_metrics(cons, 0) is None
+
+
+def test_metrics_marge_auf_gesamtleistung_bei_umsatz_null():
+    """Umsatz≈0 aber echte Gesamtleistung (Bestandsveränderung) → Margen NICHT
+    None (Basis Gesamtleistung)."""
+    cons = {"columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+            "groups": [
+                {"name": "2. Bestandserhöhung", "gkv_section": "bestandsveraenderung", "type": "ertrag",
+                 "column_sums": {0: 1000.0}, "accounts": [{"konto_nr": "8990", "values": {0: 1000.0}}]},
+                {"name": "6. Personal", "gkv_section": "personalaufwand_loehne", "type": "aufwand",
+                 "column_sums": {0: -200.0}, "accounts": [{"konto_nr": "6000", "values": {0: -200.0}}]},
+            ]}
+    m = compute_company_metrics(cons, 0)
+    assert m["umsatz"] == 0.0
+    assert m["gesamtleistung"] == 1000.0
+    assert m["ebit_marge"] is not None        # vorher None (Basis Umsatz) → jetzt da
+    assert m["personalaufwandsquote"] == 0.2
+
+
+def test_metrics_restposten_verschachtelt():
+    """Parent trägt gedruckte Summe, Konten in Kindern, unvollständig → Lücke
+    wird erkannt (vorher fälschlich completeness 1.0)."""
+    cons = {"columns": [{"label": "2024", "kind": "ja", "doc_type": "ja", "year": 2024}],
+            "groups": [
+                {"name": "4. Materialaufwand", "gkv_section": "materialaufwand_rhb", "type": "aufwand",
+                 "column_sums": {0: -1000.0}, "accounts": []},
+                {"name": "4a) RHB", "sub_group_of": "4. Materialaufwand", "type": "aufwand",
+                 "column_sums": {}, "accounts": [{"konto_nr": "5100", "values": {0: -900.0}}]},
+            ]}
+    m = compute_company_metrics(cons, 0)
+    assert m["restposten_anteil"] == 0.1      # |−1000 − (−900)| / 1000
+    assert m["completeness_score"] == 0.9
