@@ -819,6 +819,33 @@ def _apply_review_answers(groups: list[dict], questions: list[dict],
     return groups
 
 
+def group_column_value(g: dict, groups: list[dict], col_idx: int) -> float:
+    """Numerischer Wert einer Gruppe in einer Spalte — die EINE geteilte Quelle
+    für JÜ-Cross-Check (builder) UND Benchmarking-Kennzahlen (app/metrics.py).
+
+    Konten der Gruppe + (bei Top-Level-Parent) Konten der Sub-Gruppen; ein
+    reines Aggregat ohne Konten nimmt seine column_sum. Vorzeichen bleibt roh
+    (PDF-Konvention) — die Rolle/Vorzeichen-Logik liegt beim Aufrufer. col_idx
+    muss int sein (vorher _coerce_int_keys)."""
+    grp_sum = 0.0
+    for acc in g.get("accounts", []):
+        v = acc.get("values", {}).get(col_idx)
+        if isinstance(v, (int, float)):
+            grp_sum += v
+    if g.get("sub_group_of") is None:
+        for sub in groups:
+            if sub.get("sub_group_of") == g["name"]:
+                for acc in sub.get("accounts", []):
+                    v = acc.get("values", {}).get(col_idx)
+                    if isinstance(v, (int, float)):
+                        grp_sum += v
+    if grp_sum == 0.0 and not g.get("accounts"):
+        cs = (g.get("column_sums") or {}).get(col_idx)
+        if isinstance(cs, (int, float)):
+            grp_sum = cs
+    return grp_sum
+
+
 def _compute_excel_jue_per_column(groups: list[dict],
                                     columns: list[dict]) -> dict[int, float]:
     """Berechnet die numerische JUE pro Spalte parallel zur Excel-Formel,
@@ -854,27 +881,9 @@ def _compute_excel_jue_per_column(groups: list[dict],
             is_ja_native_position = has_own_col_sum and col.get("kind") == "ja"
             if col_has_account_data and is_bare_top_level and not is_ja_native_position:
                 continue
-            # Gruppen-Summe: Konten (inkl. Restposten falls ergänzt) + Konten
-            # der Sub-Gruppen wenn Top-Level Parent (HGB-Pattern). Sub-Gruppen
-            # einzeln im _endwert_groups-Output haben nur ihre eigenen Konten.
-            grp_sum = 0.0
-            for acc in g.get("accounts", []):
-                v = acc.get("values", {}).get(col_idx)
-                if isinstance(v, (int, float)):
-                    grp_sum += v
-            if g.get("sub_group_of") is None:
-                for sub in groups:
-                    if sub.get("sub_group_of") == g["name"]:
-                        for acc in sub.get("accounts", []):
-                            v = acc.get("values", {}).get(col_idx)
-                            if isinstance(v, (int, float)):
-                                grp_sum += v
-            # BWA-Aggregat ohne Konten: column_sum direkt nehmen (else-Branch
-            # in Pass 1 setzt die Zelle dort auch direkt).
-            if grp_sum == 0.0 and not g.get("accounts"):
-                cs = (g.get("column_sums") or {}).get(col_idx)
-                if isinstance(cs, (int, float)):
-                    grp_sum = cs
+            # Gruppen-Summe via geteiltem Helper (Konten + Sub-Konten bei
+            # Top-Level-Parent, sonst column_sum für reine Aggregate).
+            grp_sum = group_column_value(g, groups, col_idx)
             role = _resolve_role(g)
             if conv == "expenses_negative":
                 total += grp_sum
