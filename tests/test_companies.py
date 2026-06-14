@@ -61,26 +61,42 @@ def test_set_company_updated_job():
     assert upd["coverage_months"] == 12
 
 
-def test_jobs_list_for_user_mappt_zeilen():
+def test_jobs_list_for_user_parametrisiert_und_merged():
+    """Code-Review: KEINE String-Interpolation des Usernames in den Filter
+    (Injection). Parametrisierte .eq (eigene) + .is_ (legacy NULL), gemerged,
+    neueste zuerst."""
     client = MagicMock()
-    chain = client.table.return_value.select.return_value.or_.return_value \
-        .order.return_value.limit.return_value.execute.return_value
-    chain.data = [
+    sel = client.table.return_value.select.return_value
+    sel.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = [
         {"id": "j1", "status": "ready", "created_at": "2026-06-14T10:00:00Z",
          "output_path": "j1/output.xlsx", "source_type": "ja",
          "input_files": [{"name": "JA2024.pdf"}],
          "companies": {"name": "Acme GmbH", "branche_code": "it_software"}},
+    ]
+    sel.is_.return_value.order.return_value.limit.return_value.execute.return_value.data = [
         {"id": "j2", "status": "extracting", "created_at": "2026-06-13T09:00:00Z",
-         "output_path": None, "source_type": None, "input_files": [],
-         "companies": None},
+         "output_path": None, "source_type": None, "input_files": [], "companies": None},
     ]
     out = JobsRepo(client=client).list_for_user("alice")
+    sel.eq.assert_called_with("created_by", "alice")
+    sel.is_.assert_called_with("created_by", "null")
+    assert not sel.or_.called                  # keine Filter-Interpolation
+    assert [r["id"] for r in out] == ["j1", "j2"]   # neueste zuerst (Merge+Sort)
     assert out[0]["company_name"] == "Acme GmbH"
-    assert out[0]["branche_code"] == "it_software"
     assert out[0]["file_names"] == ["JA2024.pdf"]
     assert out[0]["has_output"] is True
-    assert out[1]["company_name"] is None      # ohne Firma
+    assert out[1]["company_name"] is None
     assert out[1]["has_output"] is False
+
+
+def test_jobs_list_for_user_leer_nutzt_nur_legacy():
+    """Leerer/None-Username darf NICHT alle Jobs liefern — nur Legacy-NULL."""
+    client = MagicMock()
+    sel = client.table.return_value.select.return_value
+    sel.is_.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+    JobsRepo(client=client).list_for_user("")
+    assert not sel.eq.called
+    sel.is_.assert_called_with("created_by", "null")
 
 
 def test_companies_update_setzt_nur_bekannte_felder():

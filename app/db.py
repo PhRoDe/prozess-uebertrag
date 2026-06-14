@@ -90,15 +90,34 @@ class JobsRepo:
     def list_for_user(self, username: str | None, limit: int = 200) -> list[dict[str, Any]]:
         """Überträge des Users (created_by == user ODER legacy NULL) inkl.
         Firma (FK-Embed), neueste zuerst. Flache Dicts fürs Listen-Template
-        (Phase A3) — kein volles Job-Model nötig."""
+        (Phase A3) — kein volles Job-Model nötig.
+
+        WICHTIG: username NICHT in einen Filter-String interpolieren (PostgREST-
+        `.or_()` würde Kommas/Operatoren im Username als Filtergrammatik parsen →
+        IDOR). Stattdessen zwei PARAMETRISIERTE Queries (.eq + .is_), in Python
+        zusammenführen. Leerer/None-Username → nur Legacy-NULL (nie 'alle')."""
         sel = ("id,status,created_at,output_path,source_type,input_files,"
                "companies(name,branche_code)")
-        q = self.client.table("jobs").select(sel)
+
+        def _run(builder):
+            return builder.order("created_at", desc=True).limit(limit).execute().data or []
+
+        raw: list[dict] = []
         if username:
-            q = q.or_(f"created_by.eq.{username},created_by.is.null")
-        resp = q.order("created_at", desc=True).limit(limit).execute()
+            raw += _run(self.client.table("jobs").select(sel).eq("created_by", username))
+        raw += _run(self.client.table("jobs").select(sel).is_("created_by", "null"))
+        # dedup per id, neueste zuerst, cap
+        seen: set = set()
+        merged: list[dict] = []
+        for r in raw:
+            jid = r.get("id")
+            if jid in seen:
+                continue
+            seen.add(jid)
+            merged.append(r)
+        merged.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         out: list[dict[str, Any]] = []
-        for r in (resp.data or []):
+        for r in merged[:limit]:
             comp = r.get("companies") or {}
             files = r.get("input_files") or []
             out.append({

@@ -162,7 +162,7 @@ def parse_company_form(items) -> dict:
     Leerer/fehlender Name → {} (keine Verknüpfung). Unbekannte branche_code →
     verworfen (FK-Schutz)."""
     f = {k: v for k, v in items if k.startswith("company_")}
-    name = (f.get("company_name") or "").strip()
+    name = (f.get("company_name") or "").strip()[:200]   # Längen-Cap gegen Row-Bloat
     if not name:
         return {}
     branche_code = (f.get("company_branche_code") or "").strip() or None
@@ -173,7 +173,7 @@ def parse_company_form(items) -> dict:
         out["branche_code"] = branche_code
     for key, col in (("company_branche_label", "branche_label"),
                      ("company_rechtsform", "rechtsform")):
-        val = (f.get(key) or "").strip()
+        val = (f.get(key) or "").strip()[:200]
         if val:
             out[col] = val
     return out
