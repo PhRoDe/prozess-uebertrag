@@ -513,3 +513,32 @@ def test_extract_setzt_company_suggestion_aus_ja():
         extract_job("job-1")
         payload = repo.set_extraction.call_args.args[1]
         assert payload["company_suggestion"] == "Mustermann Bau GmbH"
+
+
+def test_materialize_metrics_ohne_firma_skip():
+    from app.worker.tasks import _materialize_metrics
+    job = MagicMock(); job.company_id = None
+    with patch("app.db.MetricsRepo") as R:
+        _materialize_metrics(job, {"columns": [{"kind": "ja", "year": 2024}]})
+    R.assert_not_called()
+
+
+def test_materialize_metrics_upsert_nur_ja_spalten():
+    from app.worker.tasks import _materialize_metrics
+    job = MagicMock(); job.company_id = "c1"; job.id = "j1"
+    cons = {"columns": [{"kind": "ja", "doc_type": "ja", "year": 2024},
+                        {"kind": "bwa", "doc_type": "bwa", "year": 2025}]}
+    with patch("app.db.MetricsRepo") as R, \
+         patch("app.metrics.compute_company_metrics",
+               return_value={"umsatz": 1000.0, "metrics_version": 1}) as comp:
+        _materialize_metrics(job, cons)
+    comp.assert_called_once_with(cons, 0)   # nur JA (idx 0), BWA übersprungen
+    R.return_value.upsert_company_year.assert_called_once_with(
+        "c1", 2024, "j1", "ja", {"umsatz": 1000.0, "metrics_version": 1})
+
+
+def test_materialize_metrics_fehler_killt_job_nicht():
+    from app.worker.tasks import _materialize_metrics
+    job = MagicMock(); job.company_id = "c1"; job.id = "j1"
+    with patch("app.db.MetricsRepo", side_effect=RuntimeError("db down")):
+        _materialize_metrics(job, {"columns": [{"kind": "ja", "year": 2024}]})  # darf NICHT werfen

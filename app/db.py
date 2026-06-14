@@ -348,3 +348,26 @@ class CompaniesRepo:
         resp = self.client.table("companies").select("*").order("name").execute()
         out = [Company.model_validate(r) for r in (resp.data or [])]
         return [c for c in out if c.created_by is None or c.created_by == username]
+
+
+class MetricsRepo:
+    """Benchmarking-Kennzahlen pro Firma-Jahr (Phase B2). Upsert: ein neuer
+    Übertrag für dieselbe Firma+Jahr+Quelle überschreibt. Bleibt bestehen, auch
+    wenn der Quell-Job später abläuft (source_job_id ON DELETE SET NULL)."""
+
+    def __init__(self, client: Client | None = None) -> None:
+        s = get_settings()
+        self.client = client or create_client(s.supabase_url, s.supabase_service_key)
+
+    def upsert_company_year(self, company_id: str, fiscal_year: int,
+                            source_job_id: str | None, data_source: str,
+                            metrics: dict[str, Any]) -> None:
+        row = {
+            "company_id": company_id,
+            "fiscal_year": fiscal_year,
+            "data_source": data_source,
+            "source_job_id": source_job_id,
+            **metrics,  # Keys decken sich mit den Tabellen-Spalten (app/metrics.py)
+        }
+        self.client.table("company_year_metrics").upsert(
+            row, on_conflict="company_id,fiscal_year,data_source").execute()

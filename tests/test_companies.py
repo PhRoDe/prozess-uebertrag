@@ -121,3 +121,16 @@ def test_link_company_aktualisiert_bestehende():
             "c1", branche_code="it_software")
         CRepo.return_value.create.assert_not_called()
         JRepo.return_value.set_company.assert_called_with("job-1", "c1")
+
+
+def test_metrics_repo_upsert():
+    from app.db import MetricsRepo
+    client = MagicMock()
+    MetricsRepo(client=client).upsert_company_year(
+        "c1", 2024, "j1", "ja", {"umsatz": 1000.0, "jue": 50.0, "metrics_version": 1})
+    args, kw = client.table.return_value.upsert.call_args
+    row = args[0]
+    assert row["company_id"] == "c1" and row["fiscal_year"] == 2024
+    assert row["data_source"] == "ja" and row["source_job_id"] == "j1"
+    assert row["umsatz"] == 1000.0 and row["metrics_version"] == 1
+    assert kw["on_conflict"] == "company_id,fiscal_year,data_source"

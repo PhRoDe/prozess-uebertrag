@@ -247,6 +247,31 @@ def extract_job(job_id: str) -> None:
         repo.set_status(job_id, JobStatus.FAILED, error=f"Unerwarteter Fehler: {e}")
 
 
+def _materialize_metrics(job, consolidated: dict) -> None:
+    """Phase B2: Benchmarking-Kennzahlen pro JA-Spalte (=Firma-Jahr) berechnen +
+    upserten. Best-effort — ein Fehler darf den Übertrag NICHT scheitern lassen.
+    Nur wenn der Job einer Firma zugeordnet ist."""
+    company_id = getattr(job, "company_id", None)
+    if not company_id:
+        return
+    try:
+        from app.metrics import compute_company_metrics
+        from app.db import MetricsRepo
+        repo = MetricsRepo()
+        for i, col in enumerate(consolidated.get("columns") or []):
+            if (col.get("doc_type") or col.get("kind")) != "ja":
+                continue
+            year = col.get("year")
+            if year is None:
+                continue
+            m = compute_company_metrics(consolidated, i)
+            if m is None:
+                continue
+            repo.upsert_company_year(company_id, year, job.id, "ja", m)
+    except Exception:
+        log.exception("metrics materialize failed (non-critical) for %s", job.id)
+
+
 def finalize_job(job_id: str, review_answers: dict) -> None:
     """Build the Excel file from extraction + review answers. Idempotent + claim-safe."""
     repo = JobsRepo()
@@ -270,6 +295,7 @@ def finalize_job(job_id: str, review_answers: dict) -> None:
         xlsx = build_excel(consolidated, review_answers=review_answers)
         path = storage.upload_output(job_id, xlsx)
         repo.set_output(job_id, path, review_answers)
+        _materialize_metrics(job, consolidated)
     except Exception as e:
         log.exception("finalize_job(%s) error", job_id)
         repo.set_status(job_id, JobStatus.FAILED,
